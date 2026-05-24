@@ -4,7 +4,6 @@
 //! self-contained entity or render-once element; cross-component coordination
 //! happens through [`crate::state::AppState`].
 
-pub mod action_popover;
 pub mod device_carousel;
 pub mod dpi_panel;
 pub mod gesture_pad;

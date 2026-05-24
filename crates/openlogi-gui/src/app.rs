@@ -1,9 +1,9 @@
-//! Root view: header (device carousel), body (mouse model area and
-//! configuration panel), footer (settings / version).
+//! Root view: header (device carousel), body (mouse model + side config),
+//! footer (settings / version).
 //!
-//! Body currently hosts the Phase 2 [`DpiPanel`] beside the Phase 4
-//! [`ActionPopoverRow`]; the surrounding layout (mouse model + multi-tab
-//! config) is being filled in across the remaining UI.md phases.
+//! The body is now arranged per UI.md §1: the [`MouseModelView`] sits on
+//! the left, and the right column stacks the DPI panel + gesture pad
+//! (placeholders for the eventual multi-tab config panel).
 
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement, Render, Styled,
@@ -12,17 +12,17 @@ use gpui::{
 use gpui_component::{ActiveTheme, h_flex, v_flex};
 use openlogi_core::device::DeviceInventory;
 
-use crate::components::action_popover::ActionPopoverRow;
 use crate::components::device_carousel::DeviceCarousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::gesture_pad::GesturePad;
+use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{BG_DARK, BORDER, FOOTER_H, HEADER_H, TEXT_MUTED, TEXT_PRIMARY};
 
 pub struct AppView {
     carousel: Entity<DeviceCarousel>,
+    mouse_model: Entity<MouseModelView>,
     dpi_panel: Entity<DpiPanel>,
-    action_row: Entity<ActionPopoverRow>,
     gesture_pad: Entity<GesturePad>,
 }
 
@@ -32,13 +32,13 @@ impl AppView {
             cx.set_global(AppState::new());
         }
         let carousel = cx.new(|cx| DeviceCarousel::new(inventories, cx));
+        let mouse_model = cx.new(MouseModelView::new);
         let dpi_panel = cx.new(DpiPanel::new);
-        let action_row = cx.new(|_| ActionPopoverRow::default_row());
         let gesture_pad = cx.new(GesturePad::new);
         Self {
             carousel,
+            mouse_model,
             dpi_panel,
-            action_row,
             gesture_pad,
         }
     }
@@ -51,7 +51,7 @@ impl Render for AppView {
             .bg(rgb(BG_DARK))
             .text_color(rgb(TEXT_PRIMARY))
             .child(header(&self.carousel))
-            .child(body(&self.dpi_panel, &self.action_row, &self.gesture_pad))
+            .child(body(&self.mouse_model, &self.dpi_panel, &self.gesture_pad))
             .child(footer(cx))
     }
 }
@@ -75,8 +75,8 @@ fn header(carousel: &Entity<DeviceCarousel>) -> impl IntoElement {
 }
 
 fn body(
+    mouse_model: &Entity<MouseModelView>,
     dpi_panel: &Entity<DpiPanel>,
-    action_row: &Entity<ActionPopoverRow>,
     gesture_pad: &Entity<GesturePad>,
 ) -> impl IntoElement {
     h_flex()
@@ -87,15 +87,14 @@ fn body(
         .justify_center()
         .gap_10()
         .p_8()
+        .child(mouse_model.clone())
         .child(
             v_flex()
-                .gap_4()
-                .child(panel_label("Button bindings"))
-                .child(action_row.clone())
+                .gap_6()
+                .child(dpi_panel.clone())
                 .child(panel_label("Gestures"))
                 .child(gesture_pad.clone()),
         )
-        .child(dpi_panel.clone())
 }
 
 fn panel_label(text: &'static str) -> impl IntoElement {

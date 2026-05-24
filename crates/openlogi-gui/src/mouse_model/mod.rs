@@ -1,3 +1,7 @@
-//! Center-of-screen mouse model: insets the SVG base, paints the per-button
-//! glow overlay, hosts hotspot click targets, and wires the leader-line canvas
-//! out to the side labels. Filled in across UI.md phases 6, 7, and 8.
+//! Centre-of-screen mouse model: silhouette, hotspot triggers, action
+//! popovers, and (in later phases) leader-lines / labels and parallax.
+//!
+//! Per UI.md phases 6 (this view), 7 (leader lines), and 8 (ambient motion).
+
+pub mod picker;
+pub mod view;
