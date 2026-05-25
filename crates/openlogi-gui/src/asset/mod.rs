@@ -52,9 +52,14 @@ impl AssetCache {
     /// Look up the connected device's depot via its HID++ model info, then
     /// load the cached `front_core.png` + `core_metadata.json` if present.
     ///
-    /// Honours `OPENLOGI_FORCE_DEPOT=<depot>` for development — useful when
-    /// the physically connected device isn't in the registry yet but you
-    /// still want to exercise the asset path.
+    /// Match order:
+    /// 1. `OPENLOGI_FORCE_DEPOT` env override (dev convenience).
+    /// 2. Strict `{ext:x}{bolt_pid:04x}` against registry `modelId`.
+    /// 3. Suffix match on the bare bolt PID — covers devices like MX
+    ///    Master 4 where Logi's registry prefix doesn't line up with
+    ///    HID++ `extended_model_id` (registry: `"2b042"`, device reports
+    ///    `ext=01 + b042`). Safe in practice because Logitech reserves
+    ///    PID ranges per product family.
     pub fn resolve(&self, model: &DeviceModelInfo) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
@@ -63,8 +68,15 @@ impl AssetCache {
             debug!(depot = %forced, "OPENLOGI_FORCE_DEPOT override active");
             return self.load_files(&forced, entry);
         }
-        let candidates = format_candidates(model);
-        let (depot, entry) = candidates.iter().find_map(|m| index.find_by_model_id(m))?;
+        let strict = strict_candidates(model);
+        if let Some((depot, entry)) = strict.iter().find_map(|m| index.find_by_model_id(m)) {
+            return self.load_files(depot, entry);
+        }
+        let suffix = suffix_candidates(model);
+        let (depot, entry) = suffix
+            .iter()
+            .find_map(|m| index.find_by_model_id_suffix(m))?;
+        debug!(depot, "asset matched via bolt-pid suffix fallback");
         self.load_files(depot, entry)
     }
 
@@ -128,14 +140,24 @@ fn load_index(root: &Path) -> Option<Index> {
     }
 }
 
-/// Format every non-zero `model_ids[i]` as Logi's registry-style string,
-/// e.g. `extended_model_id=0x06 + model_ids[?]=0xb023 → "6b023"`.
-/// Returns candidates in array order — the first index that resolves wins.
-fn format_candidates(model: &DeviceModelInfo) -> Vec<String> {
+/// Strict registry-style candidates: `extended_model_id + bolt_pid`, e.g.
+/// `ext=0x06 + 0xb023 → "6b023"`. First match wins.
+fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {
     model
         .model_ids
         .iter()
         .filter(|id| **id != 0)
         .map(|id| format!("{:x}{:04x}", model.extended_model_id, id))
+        .collect()
+}
+
+/// Fallback candidates: just the bare bolt PID, no prefix. Lets us match
+/// registry entries whose leading byte isn't HID++'s `extended_model_id`.
+fn suffix_candidates(model: &DeviceModelInfo) -> Vec<String> {
+    model
+        .model_ids
+        .iter()
+        .filter(|id| **id != 0)
+        .map(|id| format!("{id:04x}"))
         .collect()
 }

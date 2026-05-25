@@ -58,12 +58,32 @@ impl Index {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// Find the depot matching the given `modelId` string (e.g. `"6b023"`).
-    /// The depot key is the dict key in `devices`.
+    /// Find the depot whose `modelId` matches `model_id` exactly.
     pub fn find_by_model_id(&self, model_id: &str) -> Option<(&str, &DeviceEntry)> {
         self.devices
             .iter()
             .find(|(_, entry)| entry.model_id.eq_ignore_ascii_case(model_id))
+            .map(|(depot, entry)| (depot.as_str(), entry))
+    }
+
+    /// Find the depot whose `modelId` ends with `suffix` (case-insensitive).
+    ///
+    /// Used as a fallback when the strict `ext + bolt_pid` formatting
+    /// doesn't line up — Logi's registry stores e.g. `"2b042"` for the
+    /// MX Master 4 even though HID++ DeviceInformation reports `ext=01`
+    /// on the same device. Matching on the trailing bolt PID is still
+    /// unambiguous in practice because Logitech reserves PID ranges per
+    /// product family.
+    pub fn find_by_model_id_suffix(&self, suffix: &str) -> Option<(&str, &DeviceEntry)> {
+        let suffix_lower = suffix.to_ascii_lowercase();
+        self.devices
+            .iter()
+            .find(|(_, entry)| {
+                entry
+                    .model_id
+                    .to_ascii_lowercase()
+                    .ends_with(&suffix_lower)
+            })
             .map(|(depot, entry)| (depot.as_str(), entry))
     }
 }
