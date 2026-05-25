@@ -11,7 +11,9 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme, h_flex, v_flex};
 use openlogi_core::device::DeviceInventory;
+use tracing::info;
 
+use crate::asset::AssetCache;
 use crate::components::device_carousel::DeviceCarousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::gesture_pad::GesturePad;
@@ -31,8 +33,26 @@ impl AppView {
         if !cx.has_global::<AppState>() {
             cx.set_global(AppState::new());
         }
+
+        // Resolve the device asset for the first online paired device that
+        // reports HID++ model info. Carousel-driven re-resolution comes in
+        // a later phase.
+        let cache = AssetCache::new();
+        let asset = inventories
+            .iter()
+            .flat_map(|inv| inv.paired.iter())
+            .find_map(|p| p.model_info.as_ref().and_then(|m| cache.resolve(m)));
+        if let Some(a) = asset.as_ref() {
+            info!(depot = %a.depot, display = %a.display_name, "device asset resolved");
+        } else {
+            info!(
+                root = ?cache.cache_root(),
+                "no asset match for connected devices — using synthetic silhouette"
+            );
+        }
+
         let carousel = cx.new(|cx| DeviceCarousel::new(inventories, cx));
-        let mouse_model = cx.new(MouseModelView::new);
+        let mouse_model = cx.new(|cx| MouseModelView::new(asset, cx));
         let dpi_panel = cx.new(DpiPanel::new);
         let gesture_pad = cx.new(GesturePad::new);
         Self {

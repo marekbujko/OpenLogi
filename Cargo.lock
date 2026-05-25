@@ -4198,11 +4198,14 @@ name = "openlogi-gui"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "directories",
  "gpui",
  "gpui-component",
  "gpui_platform",
  "openlogi-core",
  "openlogi-hid",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

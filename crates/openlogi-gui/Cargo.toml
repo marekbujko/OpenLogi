@@ -26,6 +26,11 @@ anyhow = { workspace = true }
 # Structured logging.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Asset registry + per-device metadata are JSON on disk.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Per-user cache directory resolution (mirrors openlogi-core/paths.rs).
+directories = { workspace = true }
 
 [lints]
 workspace = true

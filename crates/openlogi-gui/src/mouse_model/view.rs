@@ -1,23 +1,24 @@
 //! Centre-of-screen mouse silhouette with clickable hotspots and side
 //! labels connected by leader lines.
 //!
-//! Per UI.md phases 6 (silhouette + hotspots) and 7 (labels + leader lines).
-//! The base art is drawn from positioned divs rather than shipping
-//! placeholder SVGs — keeps the asset pipeline empty until a real
-//! illustrator is in the loop, and the silhouette is simple enough that
-//! shapes are fine. Each hotspot is a `Popover` whose trigger is a custom
-//! `HotspotTrigger` element that highlights on hover *and* while the popover
-//! is open.
+//! Per UI.md phases 6 (silhouette + hotspots), 7 (labels + leader lines),
+//! and 8 (breathing). When a [`ResolvedAsset`] is supplied by the asset
+//! cache the synthetic silhouette is replaced by the real device PNG and
+//! the hotspot/label positions come from the Logitech-format
+//! `core_metadata.json`. Without an asset, we fall back to the original
+//! shape-based silhouette plus [`default_hotspots`] / [`default_labels`].
 
 use std::time::Duration;
 
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, Context, ElementId, Entity, FontWeight,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Window, canvas, div, ease_in_out, hsla, px, rgb,
+    StatefulInteractiveElement as _, Styled, Window, canvas, div, ease_in_out, hsla, img, px, rgb,
 };
 use gpui_component::{Selectable, popover::Popover, v_flex};
 
+use crate::asset::ResolvedAsset;
+use crate::asset::metadata::Metadata;
 use crate::data::mouse_buttons::{ButtonId, Hotspot, MOUSE_MODEL_SIZE, default_hotspots};
 use crate::mouse_model::leader_lines::{Label, Side, paint as paint_leader_lines};
 use crate::mouse_model::picker::action_picker;
@@ -25,8 +26,7 @@ use crate::state::AppState;
 use crate::theme::{ACCENT_BLUE, BORDER, SURFACE_HOVER, TEXT_MUTED, TEXT_PRIMARY};
 
 // Side-gutter geometry. Labels sit on the *left* of the mouse so the right
-// half of the window is free for the DPI / gesture config column. Right-
-// side labelling is supported by [`leader_lines`] but unused in this view.
+// half of the window is free for the DPI / gesture config column.
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
@@ -36,27 +36,47 @@ const LABEL_H: f32 = 44.;
 /// rise/fall without feeling unstable.
 const BREATH_AMPLITUDE: f32 = 2.0;
 
+/// Approx pixel width of each hotspot hit-target. Logitech only gives us a
+/// marker point per button, not a rectangle, so we size by hand.
+const ASSET_HOTSPOT: f32 = 56.;
+
 pub struct MouseModelView {
     hotspots: Vec<Hotspot>,
     labels: Vec<Label>,
     hovered: Option<ButtonId>,
+    /// Cached device render + dimensions. `None` falls back to the
+    /// shape-based silhouette and [`default_hotspots`] / [`default_labels`].
+    asset: Option<ResolvedAsset>,
+    mouse_w: f32,
+    mouse_h: f32,
 }
 
 impl MouseModelView {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(asset: Option<ResolvedAsset>, _cx: &mut Context<Self>) -> Self {
+        let (mouse_w, mouse_h) = MOUSE_MODEL_SIZE;
+        let (mouse_w, mouse_h, hotspots, labels) = match asset.as_ref() {
+            Some(a) => {
+                let (w, h) = asset_dimensions(&a.metadata, mouse_h);
+                let hotspots = asset_hotspots(&a.metadata, w, h);
+                let labels = labels_from_hotspots(&hotspots);
+                (w, h, hotspots, labels)
+            }
+            None => (mouse_w, mouse_h, default_hotspots(), default_labels()),
+        };
         Self {
-            hotspots: default_hotspots(),
-            labels: default_labels(),
+            hotspots,
+            labels,
             hovered: None,
+            asset,
+            mouse_w,
+            mouse_h,
         }
     }
 }
 
 impl Render for MouseModelView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (mouse_w, mouse_h) = MOUSE_MODEL_SIZE;
-        // Canvas width = left gutter + mouse. No right gutter — keeps the
-        // DPI / gesture column to the right of this view clear.
+        let (mouse_w, mouse_h) = (self.mouse_w, self.mouse_h);
         let canvas_w = SIDE_W + SIDE_GAP + mouse_w;
         let canvas_h = mouse_h;
         let mouse_left = SIDE_W + SIDE_GAP;
@@ -70,8 +90,6 @@ impl Render for MouseModelView {
         let view = cx.entity();
         let hovered = self.hovered;
 
-        // Leader lines are painted via a full-canvas overlay positioned
-        // behind the labels and hotspots so highlights stay readable.
         let hotspots = self.hotspots.clone();
         let labels = self.labels.clone();
         let highlight_for_canvas = highlight;
@@ -92,25 +110,32 @@ impl Render for MouseModelView {
         )
         .size_full();
 
+        // Either the real device image, or the shape-based silhouette.
+        let device_art: AnyElement = match self.asset.as_ref() {
+            Some(a) => img(a.image_path.clone())
+                .w(px(mouse_w))
+                .h(px(mouse_h))
+                .into_any_element(),
+            None => silhouette(mouse_w, mouse_h).into_any_element(),
+        };
+
         div()
             .relative()
             .w(px(canvas_w))
             .h(px(canvas_h))
             .child(leader_canvas)
-            // Labels first (lower z) — leader lines paint over them is fine
-            // because the canvas is also a sibling at the same z. Hotspots
-            // come last so they always sit on top for click capture.
             .children(self.labels.iter().map(|label| {
                 let binding = bindings
                     .get(&label.id)
                     .map_or("Unbound".to_string(), |a| a.label().to_string());
-                label_card(label, binding, highlight == Some(label.id), mouse_left, mouse_w)
+                label_card(
+                    label,
+                    binding,
+                    highlight == Some(label.id),
+                    mouse_left,
+                    mouse_w,
+                )
             }))
-            // Mouse silhouette + hotspots inside their own positioned
-            // sub-container so the hotspot coords stay mouse-local. Wrapped
-            // in `with_animation` for the ambient breathing rise/fall
-            // (UI.md Phase 8). The container is absolute-positioned so
-            // vertical breathing happens via `.top(px(dy))`.
             .child(
                 div()
                     .absolute()
@@ -118,7 +143,7 @@ impl Render for MouseModelView {
                     .top(px(0.))
                     .w(px(mouse_w))
                     .h(px(mouse_h))
-                    .child(silhouette(mouse_w, mouse_h))
+                    .child(device_art)
                     .children(self.hotspots.iter().enumerate().map(|(idx, hotspot)| {
                         hotspot_popover(idx, *hotspot, hovered, active, &view)
                     }))
@@ -136,10 +161,62 @@ impl Render for MouseModelView {
     }
 }
 
-/// All six labels on the left side. The right-half hotspots (RightClick,
-/// MiddleClick, DpiToggle) get their leader lines crossing the silhouette;
-/// acceptable for the placeholder, and the right side of the window stays
-/// free for the config column.
+/// Scale the device image to fit a target height while preserving aspect.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "device images are < 4096 px on either axis — well within f32 mantissa"
+)]
+fn asset_dimensions(meta: &Metadata, target_h: f32) -> (f32, f32) {
+    let Some(origin) = meta.origin() else {
+        return MOUSE_MODEL_SIZE;
+    };
+    let w = target_h * (origin.width as f32) / (origin.height as f32);
+    (w, target_h)
+}
+
+/// Convert Logitech's percent-based markers into mouse-local pixel rects.
+/// Each marker is a point, so we centre a fixed-size hit area on it.
+fn asset_hotspots(meta: &Metadata, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
+    meta.hotspots()
+        .map(|h| {
+            let cx = h.marker.x / 100. * mouse_w;
+            let cy = h.marker.y / 100. * mouse_h;
+            Hotspot {
+                id: h.id,
+                x: cx - ASSET_HOTSPOT / 2.,
+                y: cy - ASSET_HOTSPOT / 2.,
+                w: ASSET_HOTSPOT,
+                h: ASSET_HOTSPOT,
+            }
+        })
+        .collect()
+}
+
+/// Lay labels out on the left side, evenly spaced down the mouse's vertical
+/// extent in the same order the hotspots appear in the asset metadata.
+/// Logitech's `label.{x,y}` direction codes are ignored for now — the
+/// current layout reserves the right gutter for the DPI / gesture column.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "hotspot count is bounded by ButtonId variants — well under f32 mantissa"
+)]
+fn labels_from_hotspots(hotspots: &[Hotspot]) -> Vec<Label> {
+    if hotspots.is_empty() {
+        return Vec::new();
+    }
+    let mouse_h = MOUSE_MODEL_SIZE.1;
+    let step = mouse_h / (hotspots.len() as f32 + 1.);
+    hotspots
+        .iter()
+        .enumerate()
+        .map(|(i, h)| Label {
+            id: h.id,
+            side: Side::Left,
+            y: step * (i as f32 + 1.),
+        })
+        .collect()
+}
+
 fn default_labels() -> Vec<Label> {
     vec![
         Label {
@@ -222,9 +299,7 @@ fn label_card(
         )
 }
 
-/// The static "mouse body" art. Bumped contrast: surface-hover fill so the
-/// silhouette is clearly distinct from the window background, plus a muted-
-/// foreground border so the outline reads at a glance.
+/// Shape-based silhouette used when no asset is cached for the device.
 fn silhouette(w: f32, h: f32) -> impl IntoElement {
     div()
         .absolute()
@@ -235,7 +310,6 @@ fn silhouette(w: f32, h: f32) -> impl IntoElement {
         .border_1()
         .border_color(rgb(TEXT_MUTED))
         .bg(rgb(SURFACE_HOVER))
-        // Scroll-wheel stripe.
         .child(
             div()
                 .absolute()
@@ -246,7 +320,6 @@ fn silhouette(w: f32, h: f32) -> impl IntoElement {
                 .rounded_md()
                 .bg(hsla(0., 0., 0.25, 1.0)),
         )
-        // Subtle divider between left-click and right-click halves.
         .child(
             div()
                 .absolute()
@@ -256,7 +329,6 @@ fn silhouette(w: f32, h: f32) -> impl IntoElement {
                 .h(px(240.))
                 .bg(rgb(BORDER)),
         )
-        // Thumb-cluster pocket on the left side.
         .child(
             div()
                 .absolute()
@@ -292,8 +364,6 @@ fn hotspot_popover(
         .into_any_element()
 }
 
-/// Transparent click target + glow. Implements [`Selectable`] so the
-/// surrounding [`Popover`] can colour it while open.
 #[derive(IntoElement)]
 struct HotspotTrigger {
     id: ElementId,

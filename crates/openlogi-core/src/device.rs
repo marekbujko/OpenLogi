@@ -64,6 +64,40 @@ pub struct ReceiverInfo {
     pub unique_id: Option<String>,
 }
 
+/// HID++ `DeviceInformation` (feature 0x0003) snapshot used to identify a
+/// device against external registries (e.g. the OpenLogi asset index).
+///
+/// `model_ids` is the per-transport PID array reported by the firmware,
+/// ordered to match the transports flagged in [`Self::transports`] (USB,
+/// eQuad, BTLE, Bluetooth) — slots that aren't enabled stay `0`. The Logi
+/// Options+ asset registry's `modelId` (e.g. `"6b023"`) is the concatenation
+/// of an extended-model byte and one of these PIDs, so callers usually want
+/// to format `extended_model_id` + `model_ids[N]` to match.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DeviceModelInfo {
+    pub entity_count: u8,
+    pub unit_id: [u8; 4],
+    pub transports: DeviceTransports,
+    pub model_ids: [u16; 3],
+    pub extended_model_id: u8,
+}
+
+/// Mirror of hidpp's `DeviceTransport` bitfield — one bool per protocol the
+/// device firmware exposes. The shape is dictated by HID++ feature 0x0003;
+/// a state machine doesn't fit since a single device can announce multiple
+/// transports simultaneously.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
+)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct DeviceTransports {
+    pub usb: bool,
+    pub equad: bool,
+    pub btle: bool,
+    pub bluetooth: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PairedDevice {
     /// Receiver-assigned slot (1..=6 for Bolt).
@@ -74,6 +108,9 @@ pub struct PairedDevice {
     pub kind: DeviceKind,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
+    /// Output of HID++ feature 0x0003 — populated for online devices that
+    /// expose the feature. Drives asset-registry lookups in the GUI.
+    pub model_info: Option<DeviceModelInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]

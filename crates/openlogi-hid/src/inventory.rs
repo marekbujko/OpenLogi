@@ -7,9 +7,12 @@ use futures_lite::StreamExt;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
-    feature::unified_battery::v0::{
-        BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
-        UnifiedBatteryFeatureV0,
+    feature::{
+        device_information::v0::DeviceInformationFeatureV0,
+        unified_battery::v0::{
+            BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
+            UnifiedBatteryFeatureV0,
+        },
     },
     nibble::U4,
     receiver::{
@@ -18,8 +21,8 @@ use hidpp::{
     },
 };
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind, PairedDevice,
-    ReceiverInfo,
+    BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind, DeviceModelInfo,
+    DeviceTransports, PairedDevice, ReceiverInfo,
 };
 use thiserror::Error;
 use tokio::time::timeout;
@@ -151,10 +154,10 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             "paired slot"
         );
 
-        let battery = if online {
-            probe_battery(&channel, slot).await
+        let (battery, model_info) = if online {
+            probe_features(&channel, slot).await
         } else {
-            None
+            (None, None)
         };
         paired.push(PairedDevice {
             slot,
@@ -163,6 +166,7 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             kind: map_kind(kind),
             online,
             battery,
+            model_info,
         });
     }
 
@@ -225,25 +229,63 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn probe_battery(channel: &Arc<HidppChannel>, slot: u8) -> Option<BatteryInfo> {
+/// Open a HID++ session for `slot` and query the two features we care about
+/// (battery, device-information) in one shot. Returns `(battery, model)` —
+/// either side may be `None` if the device doesn't expose that feature or
+/// the read fails. Device sessions are expensive (multi-round-trip) so we
+/// fold both reads through the same `Device::new` + `enumerate_features`.
+async fn probe_features(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+) -> (Option<BatteryInfo>, Option<DeviceModelInfo>) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
-            return None;
+            return (None, None);
         }
     };
     if let Err(e) = device.enumerate_features().await {
         debug!(slot, error = ?e, "enumerate_features failed");
-        return None;
+        return (None, None);
     }
-    let feature = device.get_feature::<UnifiedBatteryFeatureV0>()?;
-    let info = feature.get_battery_info().await.ok()?;
-    Some(BatteryInfo {
-        percentage: info.charging_percentage,
-        level: map_battery_level(info.level),
-        status: map_battery_status(info.status),
-    })
+
+    let battery = match device.get_feature::<UnifiedBatteryFeatureV0>() {
+        Some(feature) => feature
+            .get_battery_info()
+            .await
+            .ok()
+            .map(|info| BatteryInfo {
+                percentage: info.charging_percentage,
+                level: map_battery_level(info.level),
+                status: map_battery_status(info.status),
+            }),
+        None => None,
+    };
+
+    let model_info = match device.get_feature::<DeviceInformationFeatureV0>() {
+        Some(feature) => match feature.get_device_info().await {
+            Ok(info) => Some(DeviceModelInfo {
+                entity_count: info.entity_count,
+                unit_id: info.unit_id,
+                transports: DeviceTransports {
+                    usb: info.transport.usb,
+                    equad: info.transport.e_quad,
+                    btle: info.transport.btle,
+                    bluetooth: info.transport.bluetooth,
+                },
+                model_ids: info.model_id,
+                extended_model_id: info.extended_model_id,
+            }),
+            Err(e) => {
+                debug!(slot, error = ?e, "DeviceInformation read failed");
+                None
+            }
+        },
+        None => None,
+    };
+
+    (battery, model_info)
 }
 
 fn map_kind(k: BoltDeviceKind) -> DeviceKind {

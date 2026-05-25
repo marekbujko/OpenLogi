@@ -5,6 +5,7 @@
 //! lands when there's something to react to.
 
 mod app;
+mod asset;
 mod components;
 mod data;
 mod mouse_model;
