@@ -10,9 +10,9 @@ use crate::data::mouse_buttons::{ButtonId, Hotspot};
 use crate::theme::ACCENT_BLUE;
 
 /// Length of the horizontal stub before turning toward the label.
-const STUB: f32 = 28.;
-/// Horizontal distance from the stub to the label anchor.
-const LEAD_RUN: f32 = 140.;
+/// Kept small enough to fit inside the gap between mouse and card so
+/// the diagonal doesn't start inside the card.
+const STUB: f32 = 10.;
 
 /// Which side of the mouse a label sits on. `Right` is unused in the current
 /// view (the right half of the window is reserved for the DPI / gesture
@@ -36,15 +36,26 @@ pub struct Label {
     pub y: f32,
 }
 
-/// Paint every leader line. `mouse_origin` is the top-left of the mouse
-/// silhouette in *canvas-local* coords; hotspot coords are mouse-local;
-/// label `y` is canvas-local. Everything is converted to window-absolute
-/// before being handed to `PathBuilder` — `paint_path` expects absolute
-/// coordinates and there is no implicit canvas-to-window transform.
+/// Geometry the view supplies once per render. `mouse_origin` is the
+/// silhouette's top-left in *canvas-local* coords; `card_edge_inset` is
+/// how far the card's inner edge sits from the mouse silhouette's
+/// matching side (symmetric across left / right since the gutter is the
+/// same width on either side). Bundled into a struct so [`paint`] and
+/// [`paint_one`] don't trip clippy's argument-count limit.
+#[derive(Debug, Clone, Copy)]
+pub struct Geometry {
+    pub mouse_origin: Point<Pixels>,
+    pub mouse_w: f32,
+    pub card_edge_inset: f32,
+}
+
+/// Paint every leader line. Hotspot coords are mouse-local; label `y`
+/// is canvas-local. Everything is converted to window-absolute before
+/// being handed to `PathBuilder` — `paint_path` expects absolute coords
+/// and there is no implicit canvas-to-window transform.
 pub fn paint(
     canvas_bounds: Bounds<Pixels>,
-    mouse_origin: Point<Pixels>,
-    mouse_w: f32,
+    geometry: Geometry,
     hotspots: &[Hotspot],
     labels: &[Label],
     highlighted: Option<ButtonId>,
@@ -56,8 +67,7 @@ pub fn paint(
         };
         paint_one(
             canvas_bounds.origin,
-            mouse_origin,
-            mouse_w,
+            geometry,
             *hotspot,
             *label,
             highlighted == Some(label.id),
@@ -68,13 +78,17 @@ pub fn paint(
 
 fn paint_one(
     canvas_screen_origin: Point<Pixels>,
-    mouse_origin_local: Point<Pixels>,
-    mouse_w: f32,
+    geometry: Geometry,
     hotspot: Hotspot,
     label: Label,
     highlight: bool,
     window: &mut Window,
 ) {
+    let Geometry {
+        mouse_origin: mouse_origin_local,
+        mouse_w,
+        card_edge_inset,
+    } = geometry;
     // Mouse silhouette's top-left in window-absolute coords. Every other
     // coordinate is derived from this so we don't accidentally mix
     // coordinate systems again.
@@ -83,14 +97,17 @@ fn paint_one(
     let (hx, hy) = hotspot.center();
     let hotspot_centre = mouse_screen + point(px(hx), px(hy));
 
+    // Stub ends inside the gutter; anchor lands flush with the card's
+    // mouse-facing edge so the diagonal touches the card without
+    // overshooting through the text.
     let (stub_x, anchor_x) = match label.side {
         Side::Left => (
             mouse_screen.x - px(STUB),
-            mouse_screen.x - px(STUB) - px(LEAD_RUN),
+            mouse_screen.x - px(card_edge_inset),
         ),
         Side::Right => (
             mouse_screen.x + px(mouse_w) + px(STUB),
-            mouse_screen.x + px(mouse_w) + px(STUB) + px(LEAD_RUN),
+            mouse_screen.x + px(mouse_w) + px(card_edge_inset),
         ),
     };
     let stub = Point {

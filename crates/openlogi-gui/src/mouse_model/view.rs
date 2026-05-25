@@ -21,7 +21,7 @@ use openlogi_assets::Metadata;
 
 use crate::asset::ResolvedAsset;
 use crate::data::mouse_buttons::{ButtonId, Hotspot, MOUSE_MODEL_SIZE, default_hotspots};
-use crate::mouse_model::leader_lines::{Label, Side, paint as paint_leader_lines};
+use crate::mouse_model::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
 use crate::mouse_model::picker::action_picker;
 use crate::state::AppState;
 use crate::theme::{ACCENT_BLUE, BORDER, SURFACE_HOVER, TEXT_MUTED, TEXT_PRIMARY};
@@ -32,6 +32,11 @@ const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
 const LABEL_H: f32 = 44.;
+
+/// Horizontal distance from the mouse silhouette's edge to the nearer
+/// edge of a label card. Leader lines terminate at this offset so they
+/// touch the card without crossing into the text.
+const CARD_EDGE_INSET: f32 = SIDE_GAP + (SIDE_W - LABEL_W);
 
 /// Vertical amplitude of the breathing loop. Two pixels reads as a soft
 /// rise/fall without feeling unstable.
@@ -100,8 +105,11 @@ impl Render for MouseModelView {
                 let (hotspots, labels, highlight) = payload;
                 paint_leader_lines(
                     bounds,
-                    gpui::point(px(mouse_left), px(0.)),
-                    mouse_w,
+                    LeaderGeometry {
+                        mouse_origin: gpui::point(px(mouse_left), px(0.)),
+                        mouse_w,
+                        card_edge_inset: CARD_EDGE_INSET,
+                    },
                     &hotspots,
                     &labels,
                     highlight,

@@ -7,7 +7,7 @@
 //!
 //! Per UI.md Phase 2.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement, ParentElement, Render,
@@ -36,6 +36,13 @@ const DOT_SPEED_PER_DPI: f32 = 0.5;
 
 const TICK: Duration = Duration::from_millis(16);
 
+/// How long the preview dot keeps moving after the most recent DPI
+/// change. Outside this window the dot freezes — perpetual motion in a
+/// static settings UI reads as distracting. The window is reset on
+/// every slider change and primed on launch so the user gets one demo
+/// loop without having to touch anything.
+const ANIM_WINDOW: Duration = Duration::from_secs(3);
+
 const MIN_DPI: f32 = 200.;
 const MAX_DPI: f32 = 6400.;
 const STEP_DPI: f32 = 50.;
@@ -43,6 +50,10 @@ const STEP_DPI: f32 = 50.;
 pub struct DpiPanel {
     slider_state: Entity<SliderState>,
     dot_x: f32,
+    /// Wall-clock timestamp of the most recent slider change. The
+    /// animation loop only advances `dot_x` within [`ANIM_WINDOW`] of
+    /// this value, then leaves the dot frozen until the next change.
+    last_change: Instant,
     _slider_sub: Subscription,
     _animation: Task<()>,
 }
@@ -65,12 +76,13 @@ impl DpiPanel {
                 .default_value(initial_dpi)
         });
 
-        let slider_sub = cx.subscribe(&slider_state, |_panel, _slider, event: &SliderEvent, cx| {
+        let slider_sub = cx.subscribe(&slider_state, |panel, _slider, event: &SliderEvent, cx| {
             let SliderEvent::Change(value) = event else {
                 return;
             };
             let dpi = clamp_dpi(value.start());
             cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
+            panel.last_change = Instant::now();
             cx.notify();
         });
 
@@ -84,6 +96,9 @@ impl DpiPanel {
 
                 if this
                     .update(cx, |panel, cx| {
+                        if panel.last_change.elapsed() > ANIM_WINDOW {
+                            return;
+                        }
                         let dpi = cx
                             .try_global::<AppState>()
                             .map_or(crate::state::DEFAULT_DPI, |s| s.dpi);
@@ -105,6 +120,9 @@ impl DpiPanel {
         Self {
             slider_state,
             dot_x: 0.,
+            // Prime the window so the user sees one demo loop on launch
+            // — `dot_x` advances for ANIM_WINDOW then freezes.
+            last_change: Instant::now(),
             _slider_sub: slider_sub,
             _animation: animation,
         }
