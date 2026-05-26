@@ -163,6 +163,47 @@ impl AppState {
         self.device_list.get(self.current_device)
     }
 
+    /// Replace [`Self::device_list`] from a fresh inventory snapshot,
+    /// preserving the carousel selection by `config_key` when possible. If
+    /// the previously-selected device disappeared, the selection falls back
+    /// to index 0.
+    ///
+    /// No-op when the new list has the same `config_key` sequence as the
+    /// current one — avoids spurious `observe_global` notifications during
+    /// quiet polling cycles (P1.6).
+    pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetCache) {
+        let new_list = build_device_list(inventories, cache);
+        let unchanged = new_list.len() == self.device_list.len()
+            && new_list
+                .iter()
+                .zip(self.device_list.iter())
+                .all(|(a, b)| a.config_key == b.config_key);
+        if unchanged {
+            return;
+        }
+
+        let previous_key = self.current_record().map(|r| r.config_key.clone());
+        let new_index = previous_key
+            .as_deref()
+            .and_then(|k| new_list.iter().position(|r| r.config_key == k))
+            .unwrap_or(0);
+        let connected_keys = new_list
+            .iter()
+            .map(|r| r.config_key.as_str())
+            .collect::<Vec<_>>();
+        debug!(
+            count = new_list.len(),
+            ?connected_keys,
+            "inventory refreshed"
+        );
+
+        self.device_list = new_list;
+        self.current_device = new_index;
+        self.button_bindings = self.bindings_for_current();
+        self.sync_hook_bindings();
+        self.sync_dpi_cycle();
+    }
+
     /// Switch the carousel to `idx`. Out-of-range indices are silently
     /// ignored so callers can pass them straight through from UI events.
     /// Persists the new selection (by config key, not index — index isn't

@@ -9,6 +9,7 @@ mod asset;
 mod components;
 mod data;
 mod hardware;
+mod inventory_watcher;
 mod launch_agent;
 mod mouse_model;
 mod single_instance;
@@ -23,8 +24,8 @@ type BindingMap = Arc<RwLock<BTreeMap<ButtonId, Action>>>;
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    AppContext, Bounds, SharedString, Size, Styled, TitlebarOptions, WindowBounds, WindowOptions,
-    px,
+    AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
+    WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root};
 use openlogi_core::binding::{self, Action, ButtonId};
@@ -92,6 +93,10 @@ fn main() -> Result<()> {
     // both Arcs are captured by the callback closure.
     let _hook = start_hook(Arc::clone(&hook_bindings), Arc::clone(&dpi_cycle));
 
+    // P1.6: poll for HID hot-plug / disconnect every 2s. Updates flow
+    // through `inventory_rx` into AppState::refresh_inventories below.
+    let mut inventory_rx = inventory_watcher::spawn(std::time::Duration::from_secs(2));
+
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
         cx.spawn(async move |cx| {
@@ -132,6 +137,20 @@ fn main() -> Result<()> {
                 cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
             })
             .expect("opening the main window should not fail");
+
+            // Drain inventory updates for the lifetime of the app. Each
+            // tick rebuilds AppState.device_list and lets every observer
+            // (carousel, mouse model, DPI panel) repaint. The first poll
+            // arrives ~2 s after launch — startup uses the initial
+            // `inventories` snapshot we already passed into AppState.
+            while let Some(new_inv) = inventory_rx.recv().await {
+                cx.update(|cx| {
+                    let cache = asset::AssetCache::new();
+                    cx.update_global::<AppState, _>(|state, _| {
+                        state.refresh_inventories(&new_inv, &cache);
+                    });
+                });
+            }
         })
         .detach();
     });
