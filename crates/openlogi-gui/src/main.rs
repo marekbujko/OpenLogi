@@ -165,22 +165,37 @@ fn start_hook(bindings: BindingMap) -> Option<Hook> {
     }
 
     let result = Hook::start(move |event| {
-        match &event {
-            MouseEvent::Button { id, pressed: true } => {
-                let action = bindings.read().ok().and_then(|g| g.get(id).cloned());
-                if let Some(ref action) = action {
-                    info!(button = %id, action = action.label(), "button pressed → action matched");
+        match event {
+            MouseEvent::Button { id, pressed } => {
+                // OpenLogi "owns" the side buttons: they're suppressed so the
+                // OS default (browser back/forward) never fires, and we
+                // synthesize the bound action ourselves on press. Primary
+                // clicks pass through to keep the OS default behaviour even
+                // though `default_binding` lists actions for them — rebinding
+                // Left/Middle requires the gesture-button work in P1.5.
+                let owned = matches!(id, ButtonId::Back | ButtonId::Forward);
+                if !owned {
+                    return EventDisposition::PassThrough;
                 }
-            }
-            MouseEvent::Button { id, pressed: false } => {
-                info!(button = %id, "button released");
+                if pressed {
+                    let action = bindings.read().ok().and_then(|g| g.get(&id).cloned());
+                    if let Some(action) = action {
+                        info!(button = %id, action = action.label(), "button → executing bound action");
+                        action.execute();
+                    } else {
+                        info!(button = %id, "button pressed with no binding — suppressed");
+                    }
+                }
+                // Suppress both press and release so foreground apps never see
+                // an orphan event pair.
+                EventDisposition::Suppress
             }
             MouseEvent::Scroll { .. } => {
-                // Scroll events have no ButtonId binding; pass through silently.
+                // Scroll events have no ButtonId binding yet; pass through.
+                // P1.2 (scroll inversion) will revisit.
+                EventDisposition::PassThrough
             }
         }
-        // P0.2 will implement Action::execute; for now everything passes through.
-        EventDisposition::PassThrough
     });
 
     match result {
