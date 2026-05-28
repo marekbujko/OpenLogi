@@ -32,7 +32,11 @@ use crate::theme::{ACCENT_BLUE, BORDER, SURFACE_HOVER, TEXT_MUTED, TEXT_PRIMARY}
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
-const LABEL_H: f32 = 44.;
+// 56 px clears the two-line content (text-xs name + text-sm binding plus
+// py-2 padding) without the bottom border slicing through the binding text.
+// 44 was the exact content height and produced a "strikethrough" look on
+// the binding row.
+const LABEL_H: f32 = 56.;
 
 /// Horizontal distance from the mouse silhouette's edge to the nearer
 /// edge of a label card. Leader lines terminate at this offset so they
@@ -190,16 +194,20 @@ impl Render for MouseModelView {
             .h(px(canvas_h))
             .child(breathing_art)
             .child(leader_canvas)
-            .children(labels_outer.iter().map(|label| {
+            .children(labels_outer.iter().enumerate().map(|(idx, label)| {
                 let binding = bindings
                     .get(&label.id)
                     .map_or_else(|| "Unbound".to_string(), Action::label);
-                label_card(
-                    label,
+                label_popover(
+                    idx,
+                    *label,
                     binding,
                     highlight == Some(label.id),
                     mouse_left,
                     mouse_w,
+                    hovered,
+                    active,
+                    &view,
                 )
             }))
             .child(hotspots_layer)
@@ -367,51 +375,121 @@ fn default_labels() -> Vec<Label> {
     ]
 }
 
-fn label_card(
-    label: &Label,
+/// Position the popover wrapper at the label's slot in the side gutter and
+/// host a Popover whose trigger is the label card itself. Same picker
+/// content as the hotspot dot — clicking either entry point lands on the
+/// same binding flow.
+#[allow(clippy::too_many_arguments, reason = "wrapper position + trigger \
+state both need this many inputs; bundling would just hide the dependency")]
+fn label_popover(
+    idx: usize,
+    label: Label,
     binding: String,
     highlighted: bool,
     mouse_left: f32,
     mouse_w: f32,
-) -> impl IntoElement {
+    hovered: Option<ButtonId>,
+    active: Option<ButtonId>,
+    view: &Entity<MouseModelView>,
+) -> AnyElement {
     let x = match label.side {
         Side::Left => mouse_left - SIDE_GAP - SIDE_W,
         Side::Right => mouse_left + mouse_w + SIDE_GAP,
     };
-
+    let view = view.clone();
+    let trigger = LabelTrigger {
+        id: ("label-trigger", idx).into(),
+        label,
+        binding,
+        highlighted: highlighted || hovered == Some(label.id) || active == Some(label.id),
+        selected: false,
+        view: view.clone(),
+    };
     div()
         .absolute()
         .left(px(x))
         .top(px(label.y - LABEL_H / 2.))
         .w(px(LABEL_W))
         .h(px(LABEL_H))
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(if highlighted { ACCENT_BLUE } else { BORDER }))
-        .bg(rgb(SURFACE_HOVER))
         .child(
-            v_flex()
-                .gap_0p5()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
-                        .child(label.id.label()),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(if highlighted {
-                            ACCENT_BLUE
-                        } else {
-                            TEXT_PRIMARY
-                        }))
-                        .child(binding),
-                ),
+            Popover::new(("label-popover", idx))
+                .anchor(Anchor::TopLeft)
+                .mouse_button(MouseButton::Left)
+                .trigger(trigger)
+                .content(move |_state, _window, cx| action_picker(label.id, &view, cx)),
         )
+        .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct LabelTrigger {
+    id: ElementId,
+    label: Label,
+    binding: String,
+    highlighted: bool,
+    selected: bool,
+    view: Entity<MouseModelView>,
+}
+
+impl Selectable for LabelTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for LabelTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let highlighted = self.highlighted || self.selected;
+        let btn = self.label.id;
+        let view = self.view;
+        div()
+            .id(self.id)
+            .w(px(LABEL_W))
+            .h(px(LABEL_H))
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if highlighted { ACCENT_BLUE } else { BORDER }))
+            .bg(rgb(SURFACE_HOVER))
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(self.label.id.label()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(if highlighted {
+                                ACCENT_BLUE
+                            } else {
+                                TEXT_PRIMARY
+                            }))
+                            .child(self.binding),
+                    ),
+            )
+            .on_hover(move |hovered, _window, cx| {
+                let is_hovered = *hovered;
+                view.update(cx, |this, cx| {
+                    if is_hovered {
+                        this.hovered = Some(btn);
+                    } else if this.hovered == Some(btn) {
+                        this.hovered = None;
+                    }
+                    cx.notify();
+                });
+            })
+    }
 }
 
 /// Shape-based silhouette used when no asset is cached for the device.

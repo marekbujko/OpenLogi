@@ -12,11 +12,15 @@ use gpui::{
 };
 use gpui_component::{popover::PopoverState, v_flex};
 
+const POPOVER_W: f32 = 200.;
+/// Cap the scrollable action list at ~11 rows tall. The catalog has 29+
+/// entries plus section headers, so the full list would otherwise blow
+/// past the window height. Header + footer-less list stays sticky.
+const POPOVER_LIST_MAX_H: f32 = 360.;
+
 use crate::data::mouse_buttons::{Action, ButtonId, Category};
 use crate::state::AppState;
 use crate::theme::{ACCENT_BLUE, SURFACE, SURFACE_HOVER, TEXT_MUTED, TEXT_PRIMARY};
-
-const POPOVER_W: f32 = 200.;
 
 /// Build the popover body that lets the user re-bind `btn`.
 ///
@@ -119,6 +123,16 @@ pub fn action_picker<T: 'static>(
                 .pb_1()
                 .child(format!("Bind {}", btn.label())),
         )
-        .children(children)
+        // Action list scrolls. The catalog is long enough (29+ actions
+        // across half a dozen categories) that an unconstrained popover
+        // overflows the window; capping height + scroll keeps the
+        // sticky-header pattern that's already familiar to the user.
+        .child(
+            div()
+                .id("picker-scroll")
+                .max_h(px(POPOVER_LIST_MAX_H))
+                .overflow_y_scroll()
+                .children(children),
+        )
         .into_any_element()
 }
