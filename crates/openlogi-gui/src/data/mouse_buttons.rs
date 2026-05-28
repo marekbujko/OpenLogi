@@ -36,25 +36,12 @@ impl Hotspot {
     }
 }
 
-/// Default hotspot layout. Coordinates approximate a simple top-down mouse
-/// shape and will be tuned against the real SVG in Phase 6.
+/// Fallback hotspot layout for the no-asset path (synthetic silhouette).
+/// Primary L/R click are intentionally absent — Logi doesn't expose them
+/// as remappable and we follow the same rule everywhere.
 #[must_use]
 pub fn default_hotspots() -> Vec<Hotspot> {
     vec![
-        Hotspot {
-            id: ButtonId::LeftClick,
-            x: 40.,
-            y: 60.,
-            w: 160.,
-            h: 200.,
-        },
-        Hotspot {
-            id: ButtonId::RightClick,
-            x: 220.,
-            y: 60.,
-            w: 160.,
-            h: 200.,
-        },
         Hotspot {
             id: ButtonId::MiddleClick,
             x: 180.,

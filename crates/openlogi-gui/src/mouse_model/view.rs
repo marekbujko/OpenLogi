@@ -345,29 +345,19 @@ fn labels_from_hotspots(hotspots: &[Hotspot]) -> Vec<Label> {
 fn default_labels() -> Vec<Label> {
     vec![
         Label {
-            id: ButtonId::LeftClick,
-            side: Side::Left,
-            y: 60.,
-        },
-        Label {
-            id: ButtonId::RightClick,
-            side: Side::Left,
-            y: 130.,
-        },
-        Label {
             id: ButtonId::MiddleClick,
             side: Side::Left,
-            y: 200.,
+            y: 120.,
         },
         Label {
             id: ButtonId::Back,
             side: Side::Left,
-            y: 290.,
+            y: 240.,
         },
         Label {
             id: ButtonId::Forward,
             side: Side::Left,
-            y: 360.,
+            y: 340.,
         },
         Label {
             id: ButtonId::DpiToggle,
@@ -477,8 +467,8 @@ fn hotspot_popover(
     // Popover renders its trigger inside a parent div that carries the
     // `on_mouse_down` handler; if the trigger is `.absolute()`, the
     // wrapper div collapses to 0×0 and clicks never hit the handler.
-    // Putting `.absolute()` on the wrapper and a w_full/h_full trigger
-    // keeps the wrapper sized to the hotspot.
+    // The trigger sizes itself in explicit px (see HotspotTrigger),
+    // and the wrapper here carries the absolute positioning.
     let view = view.clone();
     let trigger = HotspotTrigger {
         id: ("hotspot-trigger", idx).into(),
