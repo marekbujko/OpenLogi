@@ -2,8 +2,6 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use async_hid::HidBackend;
-use futures_lite::StreamExt;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
@@ -28,14 +26,7 @@ use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use crate::transport::AsyncHidChannel;
-
-/// Logitech HID vendor ID.
-const LOGITECH_VID: u16 = 0x046d;
-/// HID++ long-report usage page / usage. Filtering on this pair gives us one
-/// HID node per physical HID++ device on every supported OS.
-const HIDPP_USAGE_PAGE: u16 = 0xff00;
-const HIDPP_LONG_USAGE_ID: u16 = 0x0002;
+use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 /// How long to wait for device-arrival event bursts before assuming the
 /// receiver has finished reporting. MX Master 4 (and other devices that may
@@ -68,17 +59,7 @@ pub enum InventoryError {
 /// We merge the two so an MX Master that's been asleep still shows up with
 /// its codename and kind even before you click it.
 pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
-    let backend = HidBackend::default();
-    let candidates: Vec<async_hid::Device> = backend
-        .enumerate()
-        .await?
-        .filter(|d| {
-            d.vendor_id == LOGITECH_VID
-                && d.usage_page == HIDPP_USAGE_PAGE
-                && d.usage_id == HIDPP_LONG_USAGE_ID
-        })
-        .collect()
-        .await;
+    let candidates = enumerate_hidpp_devices().await?;
 
     debug!(count = candidates.len(), "HID++ candidate interfaces");
 
@@ -95,18 +76,8 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
 }
 
 async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, InventoryError> {
-    // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value so we
-    // can keep using `dev` (which `to_device_info` would consume).
-    let info: async_hid::DeviceInfo = (*dev).clone();
-    let (reader, writer) = dev.open().await?;
-    let raw = AsyncHidChannel::new(reader, writer, info.clone());
-
-    let channel = match HidppChannel::from_raw_channel(raw).await {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            debug!(name = %info.name, error = ?e, "not a HID++ channel");
-            return Ok(None);
-        }
+    let Some((info, channel)) = open_hidpp_channel(dev).await? else {
+        return Ok(None);
     };
 
     let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(&channel)) else {

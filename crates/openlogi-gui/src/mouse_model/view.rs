@@ -476,6 +476,10 @@ impl RenderOnce for HotspotTrigger {
         // for the percentage) and the popover's `on_mouse_down` never
         // receives clicks. Painting explicit pixels gives the popover's
         // wrapper a real hit-test region.
+        // DIAGNOSTIC: hotspot rects always visible (red border + faint
+        // bg) so we can see exactly where the click target sits relative
+        // to the device PNG, plus per-event traces to localise where
+        // clicks are being absorbed.
         div()
             .id(self.id)
             .w(px(hotspot.w))
@@ -483,17 +487,18 @@ impl RenderOnce for HotspotTrigger {
             .rounded_md()
             .border_2()
             .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
+                gpui::Hsla::from(rgb(ACCENT_BLUE))
             } else {
-                hsla(0., 0., 0., 0.)
+                hsla(0.0, 0.85, 0.55, 0.7)
             })
             .bg(if highlighted {
                 hsla(0.6, 0.85, 0.6, 0.18)
             } else {
-                hsla(0., 0., 0., 0.)
+                hsla(0.0, 0.85, 0.55, 0.12)
             })
             .on_hover(move |hovered, _window, cx| {
                 let is_hovered = *hovered;
+                tracing::info!(?btn, hovered = is_hovered, "hotspot hover event");
                 view.update(cx, |this, cx| {
                     if is_hovered {
                         this.hovered = Some(btn);
@@ -503,9 +508,6 @@ impl RenderOnce for HotspotTrigger {
                     cx.notify();
                 });
             })
-            // Diagnostic only — confirms clicks reach the hotspot trigger.
-            // Does not stop_propagation so the surrounding Popover can still
-            // observe the same event and toggle open.
             .on_mouse_down(MouseButton::Left, move |_ev: &MouseDownEvent, _window, _cx| {
                 tracing::info!(?btn, "hotspot click reached trigger");
             })

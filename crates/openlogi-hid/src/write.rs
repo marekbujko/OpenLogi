@@ -6,8 +6,6 @@
 
 use std::sync::Arc;
 
-use async_hid::HidBackend;
-use futures_lite::StreamExt as _;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
@@ -19,12 +17,7 @@ use tracing::debug;
 
 use crate::adjustable_dpi::AdjustableDpiFeatureV0;
 use crate::smartshift::{SmartShiftFeatureV0, SmartShiftMode, SmartShiftStatus};
-use crate::transport::AsyncHidChannel;
-
-/// Logitech HID vendor ID — kept in sync with [`crate::inventory`].
-const LOGITECH_VID: u16 = 0x046d;
-const HIDPP_USAGE_PAGE: u16 = 0xff00;
-const HIDPP_LONG_USAGE_ID: u16 = 0x0002;
+use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 #[derive(Debug, Error)]
 pub enum WriteError {
@@ -237,28 +230,11 @@ where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,
 {
-    let backend = HidBackend::default();
-    let candidates: Vec<async_hid::Device> = backend
-        .enumerate()
-        .await?
-        .filter(|d| {
-            d.vendor_id == LOGITECH_VID
-                && d.usage_page == HIDPP_USAGE_PAGE
-                && d.usage_id == HIDPP_LONG_USAGE_ID
-        })
-        .collect()
-        .await;
+    let candidates = enumerate_hidpp_devices().await?;
 
     for dev in candidates {
-        let info: async_hid::DeviceInfo = (*dev).clone();
-        let (reader, writer) = dev.open().await?;
-        let raw = AsyncHidChannel::new(reader, writer, info.clone());
-        let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                debug!(name = %info.name, error = ?e, "not a HID++ channel");
-                continue;
-            }
+        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+            continue;
         };
         let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(&channel)) else {
             continue;

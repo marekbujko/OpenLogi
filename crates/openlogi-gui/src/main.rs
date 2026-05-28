@@ -31,7 +31,7 @@ use gpui::{
     WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root};
-use openlogi_core::binding::{self, Action, ButtonId};
+use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
@@ -191,12 +191,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Load config from disk and build the initial hook-shared state for the
-/// first paired device with HID++ model info — same selection rule as
-/// [`AppState::with_runtime`]. Pre-populating both `Arc`s here means the
-/// hook callback sees the right bindings *and* DPI presets from the very
-/// first event, well before `AppState::with_runtime_shared` runs inside
-/// the GPUI thread.
+/// Load config from disk and build the initial hook-shared state using the
+/// same selection and binding rules as [`AppState::with_runtime_shared`].
+/// Pre-populating both `Arc`s here means the hook callback sees the right
+/// bindings *and* DPI presets from the very first event, well before the GPUI
+/// global is installed.
 fn load_config_and_bindings(
     inventories: &[DeviceInventory],
 ) -> (BindingMap, Arc<RwLock<DpiCycleState>>, Config) {
@@ -208,49 +207,10 @@ fn load_config_and_bindings(
         }
     };
 
-    let (device_key, dpi_target) = inventories
-        .iter()
-        .find_map(|inv| {
-            let receiver_uid = inv.receiver.unique_id.clone();
-            inv.paired.iter().find_map(|p| {
-                let model = p.model_info.as_ref()?;
-                let key = model.config_key();
-                let target =
-                    receiver_uid
-                        .as_ref()
-                        .map(|uid| crate::components::dpi_panel::DpiTarget {
-                            receiver_uid: uid.clone(),
-                            slot: p.slot,
-                        });
-                Some((Some(key), target))
-            })
-        })
-        .unwrap_or_default();
-
-    let stored = device_key
-        .as_deref()
-        .map(|k| config.bindings_for(k))
-        .unwrap_or_default();
-
-    let mut bindings: BTreeMap<ButtonId, Action> = ButtonId::ALL
-        .iter()
-        .copied()
-        .map(|b| (b, binding::default_binding(b)))
-        .collect();
-    for (k, v) in stored {
-        bindings.insert(k, v);
-    }
+    let cache = asset::AssetCache::new();
+    let (bindings, dpi_cycle) = AppState::initial_hook_state(&config, inventories, &cache);
     let bindings_arc = Arc::new(RwLock::new(bindings));
-
-    let dpi_presets = device_key
-        .as_deref()
-        .map(|k| config.dpi_presets(k))
-        .unwrap_or_default();
-    let dpi_cycle_arc = Arc::new(RwLock::new(DpiCycleState {
-        presets: dpi_presets,
-        index: 0,
-        target: dpi_target,
-    }));
+    let dpi_cycle_arc = Arc::new(RwLock::new(dpi_cycle));
 
     (bindings_arc, dpi_cycle_arc, config)
 }

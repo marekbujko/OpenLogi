@@ -161,6 +161,33 @@ impl AppState {
         state
     }
 
+    /// Build the binding and DPI snapshots consumed by the OS hook before
+    /// the GPUI global exists. Uses the same device-selection and binding
+    /// overlay rules as [`Self::with_runtime_shared`].
+    #[must_use]
+    pub fn initial_hook_state(
+        config: &Config,
+        inventories: &[DeviceInventory],
+        cache: &AssetCache,
+    ) -> (BTreeMap<ButtonId, Action>, DpiCycleState) {
+        let device_list = build_device_list(inventories, cache);
+        let current_device = pick_initial_device(&device_list, config.selected_device());
+        let record = device_list.get(current_device);
+        let bindings = bindings_for(config, record, None);
+        let presets = record
+            .map(|r| config.dpi_presets(&r.config_key))
+            .unwrap_or_default();
+        let target = record.and_then(|r| r.dpi_target.clone());
+        (
+            bindings,
+            DpiCycleState {
+                presets,
+                index: 0,
+                target,
+            },
+        )
+    }
+
     /// Update the frontmost-app tracking + reload the binding map to overlay
     /// any per-app overrides for the new app (P1.4). Hook-shared `Arc` gets
     /// the same map so background button presses observe the new bindings
@@ -312,22 +339,11 @@ impl AppState {
     }
 
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
-        let stored = self
-            .current_record()
-            .map(|r| {
-                self.config
-                    .effective_bindings(&r.config_key, self.current_app_bundle.as_deref())
-            })
-            .unwrap_or_default();
-        let mut bindings: BTreeMap<ButtonId, Action> = ButtonId::ALL
-            .iter()
-            .copied()
-            .map(|b| (b, default_binding(b)))
-            .collect();
-        for (k, v) in stored {
-            bindings.insert(k, v);
-        }
-        bindings
+        bindings_for(
+            &self.config,
+            self.current_record(),
+            self.current_app_bundle.as_deref(),
+        )
     }
 
     /// Mirror [`Self::button_bindings`] into the hook-shared `Arc`. Called
@@ -411,4 +427,23 @@ fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) -> usize {
     saved
         .and_then(|key| list.iter().position(|r| r.config_key == key))
         .unwrap_or(0)
+}
+
+fn bindings_for(
+    config: &Config,
+    record: Option<&DeviceRecord>,
+    app_bundle: Option<&str>,
+) -> BTreeMap<ButtonId, Action> {
+    let stored = record
+        .map(|r| config.effective_bindings(&r.config_key, app_bundle))
+        .unwrap_or_default();
+    let mut bindings: BTreeMap<ButtonId, Action> = ButtonId::ALL
+        .iter()
+        .copied()
+        .map(|b| (b, default_binding(b)))
+        .collect();
+    for (k, v) in stored {
+        bindings.insert(k, v);
+    }
+    bindings
 }

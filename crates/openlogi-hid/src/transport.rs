@@ -6,11 +6,56 @@
 //! long-report usage page at enumeration time, then returning a hardcoded
 //! `Some((true, true))` from `supports_short_long_hidpp`.
 
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
-use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceInfo, DeviceReader, DeviceWriter};
-use hidpp::{async_trait, channel::RawHidChannel};
+use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceInfo, DeviceReader, DeviceWriter, HidBackend};
+use futures_lite::StreamExt as _;
+use hidpp::{
+    async_trait,
+    channel::{HidppChannel, RawHidChannel},
+};
 use tokio::sync::Mutex;
+use tracing::debug;
+
+/// Logitech HID vendor ID.
+const LOGITECH_VID: u16 = 0x046d;
+/// HID++ long-report usage page / usage. Filtering on this pair gives us one
+/// HID node per physical HID++ device on every supported OS.
+const HIDPP_USAGE_PAGE: u16 = 0xff00;
+const HIDPP_LONG_USAGE_ID: u16 = 0x0002;
+
+pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
+{
+    let backend = HidBackend::default();
+    Ok(backend
+        .enumerate()
+        .await?
+        .filter(|d| {
+            d.vendor_id == LOGITECH_VID
+                && d.usage_page == HIDPP_USAGE_PAGE
+                && d.usage_id == HIDPP_LONG_USAGE_ID
+        })
+        .collect()
+        .await)
+}
+
+pub(crate) async fn open_hidpp_channel(
+    dev: async_hid::Device,
+) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, async_hid::HidError> {
+    // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value so we can
+    // keep using `dev` (which `to_device_info` would consume).
+    let info: DeviceInfo = (*dev).clone();
+    let (reader, writer) = dev.open().await?;
+    let raw = AsyncHidChannel::new(reader, writer, info.clone());
+    let channel = match HidppChannel::from_raw_channel(raw).await {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            debug!(name = %info.name, error = ?e, "not a HID++ channel");
+            return Ok(None);
+        }
+    };
+    Ok(Some((info, channel)))
+}
 
 pub(crate) struct AsyncHidChannel {
     reader: Mutex<DeviceReader>,
