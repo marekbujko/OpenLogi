@@ -240,9 +240,9 @@ fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32) -> (f32, f32) 
 /// hotspot.y       = marker.y / 100 * mouse_h     // height ratio is 1:1
 /// ```
 ///
-/// Fallback hotspots for Left/Right Click (Logi omits them from metadata)
-/// are appended at standard top-of-mouse percentages of the bbox so they
-/// still land on the visible buttons.
+/// Primary left/right clicks deliberately have no entry — Logi never
+/// exposes them as remappable (and Options+ doesn't either), so we don't
+/// invent markers for them.
 #[allow(
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
@@ -266,7 +266,7 @@ fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> 
         (cx, cy)
     };
 
-    let mut hotspots: Vec<Hotspot> = asset
+    asset
         .metadata
         .assignments()
         .filter_map(|a| {
@@ -280,36 +280,7 @@ fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> 
                 h: ASSET_HOTSPOT,
             })
         })
-        .collect();
-    // Fallback positions for primary clicks. Logi omits these from the
-    // assignment array (Options+ never lets you rebind L/R click), but
-    // we still want them in the UI. Anchored relative to the visible
-    // wheel marker (~75.5, 19 on side_core for MX Master 4) so they sit
-    // on the foreshortened top-front surface: LeftClick just forward and
-    // a bit left of the wheel, RightClick forward and a bit right.
-    let has_left = hotspots.iter().any(|h| h.id == ButtonId::LeftClick);
-    let has_right = hotspots.iter().any(|h| h.id == ButtonId::RightClick);
-    if !has_left {
-        let (cx, cy) = marker_to_canvas(70., 12.);
-        hotspots.push(Hotspot {
-            id: ButtonId::LeftClick,
-            x: cx - ASSET_HOTSPOT / 2.,
-            y: cy - ASSET_HOTSPOT / 2.,
-            w: ASSET_HOTSPOT,
-            h: ASSET_HOTSPOT,
-        });
-    }
-    if !has_right {
-        let (cx, cy) = marker_to_canvas(82., 14.);
-        hotspots.push(Hotspot {
-            id: ButtonId::RightClick,
-            x: cx - ASSET_HOTSPOT / 2.,
-            y: cy - ASSET_HOTSPOT / 2.,
-            w: ASSET_HOTSPOT,
-            h: ASSET_HOTSPOT,
-        });
-    }
-    hotspots
+        .collect()
 }
 
 /// Logitech's stable slot vocabulary → OpenLogi's `ButtonId`. Intentionally
