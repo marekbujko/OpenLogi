@@ -17,25 +17,29 @@ use openlogi_assets::http;
 /// Default origin. Overridable via `--base` / `OPENLOGI_ASSETS`.
 const DEFAULT_BASE: &str = "https://assets.openlogi.org";
 
-/// Required per-depot files.
+/// Files every depot must have — their absence is a real registry problem
+/// worth a warning.
 /// - `core_metadata.json` carries the hotspot percentages
-/// - `manifest.json` maps HID++ `extended_model_id` → colour variant
-/// - `front_core.png` is the carousel / branding render
-/// - `side_core.png` is the *buttons* render — Logi calibrates marker
-///   percentages against this one, so the mouse-model view must show it
-///   to keep hotspots over the actual buttons.
-const REQUIRED_FILES: &[&str] = &[
-    "core_metadata.json",
-    "manifest.json",
-    "front_core.png",
-    "side_core.png",
-];
+/// - `manifest.json` maps HID++ `extended_model_id` → colour variant and
+///   each resource key (`device_buttons_image`, …) → filename
+/// - `front_core.png` is the carousel / branding render, and also the
+///   buttons render for simpler devices (trackballs, presenters, entry
+///   mice) whose manifest points `device_buttons_image` straight at it.
+const REQUIRED_FILES: &[&str] = &["core_metadata.json", "manifest.json", "front_core.png"];
 
-/// Returns true when `name` is a colour variant PNG OpenLogi needs
-/// locally: `front_ext_N.png` for the carousel, `side_ext_N.png` for
-/// the buttons-config view. The depot also ships `back_*` renders —
-/// those stay remote until a future easyswitch view needs them.
-fn is_required_variant(name: &str) -> bool {
+/// Returns true when `name` is an *optional* asset OpenLogi fetches when the
+/// registry lists it but never warns about when it's absent:
+/// - `side_core.png` — the dedicated buttons render, present only on devices
+///   (e.g. MX Master) whose `device_buttons_image` is a distinct side view.
+///   Devices that reuse `front_core.png` simply don't ship one.
+/// - `front_ext_N.png` / `side_ext_N.png` — per-colour variants for the
+///   carousel and the buttons-config view.
+///
+/// (`back_*` renders stay remote until an easyswitch view needs them.)
+fn is_optional_asset(name: &str) -> bool {
+    if name == "side_core.png" {
+        return true;
+    }
     let path = std::path::Path::new(name);
     let ext_is_png = path
         .extension()
@@ -89,14 +93,13 @@ pub fn run(args: SyncArgs) -> Result<()> {
         let dir = out.join(depot);
         fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
-        // Required core set + every front-view colour variant the
-        // registry knows about. The depot manifest is fetched
-        // unconditionally so `AssetCache` can route HID++ ext bytes to
-        // the right PNG; missing files trip a per-file warning.
+        // Required core set + every optional asset (side render + colour
+        // variants) the registry lists. Only a *required* file's absence
+        // warns; optional ones are simply skipped when not present.
         let wanted: Vec<&openlogi_assets::FileEntry> = entry
             .files
             .iter()
-            .filter(|f| REQUIRED_FILES.contains(&f.name.as_str()) || is_required_variant(&f.name))
+            .filter(|f| REQUIRED_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
             .collect();
         for required in REQUIRED_FILES {
             if !wanted.iter().any(|f| f.name == *required) {
@@ -120,7 +123,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
         .devices
         .values()
         .flat_map(|d| d.files.iter())
-        .filter(|f| REQUIRED_FILES.contains(&f.name.as_str()) || is_required_variant(&f.name))
+        .filter(|f| REQUIRED_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
         .map(|f| f.bytes)
         .sum();
     #[allow(

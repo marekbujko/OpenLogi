@@ -24,17 +24,16 @@ pub const DEFAULT_BASE: &str = "https://assets.openlogi.org";
 
 /// Baseline files always fetched per depot. `AssetCache` reads
 /// `core_metadata.json` for hotspot layout, `manifest.json` for the
-/// `extended_model_id` → colour-variant lookup, `front_core.png` for the
-/// carousel render, and `side_core.png` for the buttons-config view —
-/// Logi calibrates the assignment markers against the side image, so
-/// hotspots only line up with real buttons when that one is local.
-/// Variant PNGs are picked up in a second pass after the manifest lands.
-const FETCH_FILES: &[&str] = &[
-    "core_metadata.json",
-    "manifest.json",
-    "front_core.png",
-    "side_core.png",
-];
+/// `extended_model_id` → colour-variant lookup, and `front_core.png` for
+/// the carousel (and, on simpler devices, the buttons view too).
+///
+/// `side_core.png` (the dedicated buttons render that Logi calibrates the
+/// assignment markers against) is *optional* — only MX-class devices ship
+/// one; trackballs / presenters / entry mice point `device_buttons_image`
+/// at `front_core.png` instead. It's fetched separately, only when the
+/// registry lists it, so those devices don't 404. Colour variants are
+/// picked up in a second pass after the manifest lands.
+const FETCH_FILES: &[&str] = &["core_metadata.json", "manifest.json", "front_core.png"];
 
 /// Whether the startup HTTP sync should run on this launch.
 ///
@@ -116,6 +115,16 @@ fn sync_depot(
     // so the variant lookup below has something to consult.
     for name in FETCH_FILES {
         fetch_to_cache(server, &entry.asset_path, &dir, entry, name)?;
+    }
+
+    // Dedicated buttons render — only present on devices whose manifest
+    // points `device_buttons_image` at a distinct side view. Fetch it only
+    // when the registry lists it so front-only devices don't 404; failure
+    // is non-fatal (the GUI falls back to `front_core.png`).
+    if entry.files.iter().any(|f| f.name == "side_core.png") {
+        if let Err(e) = fetch_to_cache(server, &entry.asset_path, &dir, entry, "side_core.png") {
+            warn!(depot, error = %e, "side_core.png fetch failed");
+        }
     }
 
     // Optional second pass: download the colour variant PNGs matching
