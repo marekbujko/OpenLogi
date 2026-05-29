@@ -198,12 +198,14 @@ mod macos {
     use std::sync::{Arc, mpsc};
     use std::thread;
 
-    use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
+    use core_foundation::runloop::{
+        CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+    };
     use core_graphics::event::{
         CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
         CGEventTapProxy, CGEventType, CallbackResult, EventField,
     };
-    use tracing::{debug, error};
+    use tracing::{debug, error, warn};
 
     use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
 
@@ -468,8 +470,53 @@ mod macos {
             return;
         }
 
-        // Blocks until `CFRunLoop::stop()` is called from another thread.
-        CFRunLoop::run_current();
+        // Service the tap in short slices instead of an unbounded
+        // `run_current()`. Between slices we re-check Accessibility: an active
+        // tap at the HID location that outlives its permission wedges the
+        // *entire* system input stream — mouse and keyboard alike — until
+        // reboot. If the user revokes access while we're live, tear the tap
+        // down right here, on the tap's own thread, so input is restored even
+        // when the UI thread is already stuck. `stop()` (normal shutdown)
+        // returns `Stopped` and also breaks the loop.
+        loop {
+            match CFRunLoop::run_in_mode(
+                // SAFETY: framework-provided static CFStringRef, 'static.
+                unsafe { kCFRunLoopDefaultMode },
+                std::time::Duration::from_millis(500),
+                false,
+            ) {
+                CFRunLoopRunResult::Stopped | CFRunLoopRunResult::Finished => break,
+                CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
+            }
+            if !has_accessibility() {
+                warn!(
+                    "Accessibility revoked while the event tap was live — \
+                     disabling the tap to avoid wedging system input"
+                );
+                break;
+            }
+        }
+
+        // Detach the tap from the event stream synchronously before unwinding,
+        // so input recovers immediately rather than whenever CF happens to
+        // release the port.
+        disable_tap(&tap);
+    }
+
+    /// Disable an active event tap now. core-graphics only exposes the enable
+    /// side of `CGEventTapEnable`, so we bind the disable side ourselves.
+    fn disable_tap(tap: &CGEventTap) {
+        use core_foundation::base::TCFType as _;
+
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
+        }
+
+        // SAFETY: `tap.mach_port()` is a live `CFMachPort` for the duration of
+        // the call; `CGEventTapEnable(.., false)` is idempotent and merely
+        // detaches the tap from the system event stream.
+        unsafe { CGEventTapEnable(tap.mach_port().as_concrete_TypeRef(), false) };
     }
 
     /// Signal the run loop to stop and join the background thread.

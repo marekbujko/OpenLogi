@@ -217,6 +217,14 @@ fn main() -> Result<()> {
                         });
                     }
                     Some(granted) = accessibility_rx.recv() => {
+                        if !granted {
+                            // Revoked while running: drop our handle so the
+                            // stale hook is stopped/joined and a later re-grant
+                            // reinstalls a fresh one. (The hook's own thread
+                            // also self-disables its tap — this is the UI-side
+                            // half: clear the handle + re-show the gate.)
+                            hook_handle = None;
+                        }
                         cx.update(|cx| {
                             if cx.has_global::<AppState>() {
                                 cx.update_global::<AppState, _>(|state, _| {

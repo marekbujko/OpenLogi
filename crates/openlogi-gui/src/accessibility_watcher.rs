@@ -2,9 +2,10 @@
 //!
 //! Polls [`openlogi_hook::Hook::has_accessibility`] on a dedicated OS thread
 //! and forwards the trust state over an mpsc whenever it changes (plus an
-//! initial value). The GUI uses it to (a) show/hide the permission gate and
-//! (b) install the OS mouse hook the moment the user grants access, without
-//! requiring a restart.
+//! initial value). The GUI uses it to (a) show/hide the permission gate,
+//! (b) install the OS mouse hook the moment the user grants access (no
+//! restart needed), and (c) drop the hook + re-show the gate if access is
+//! revoked while running.
 //!
 //! Non-macOS platforms have no Accessibility concept — `has_accessibility`
 //! returns `true` there — so the watcher emits a single `true` and exits.
@@ -46,13 +47,11 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<bool> {
                         return;
                     }
                     last = Some(granted);
-                    // Once granted it can't be revoked without a relaunch
-                    // (macOS restarts the process on revocation), so stop
-                    // polling to keep the thread idle-free.
-                    if granted {
-                        return;
-                    }
                 }
+                // Keep polling in *both* directions for the whole session.
+                // Revocation does not relaunch the app, so the consumer must
+                // hear about it to tear the hook down and re-show the gate;
+                // a later re-grant then reinstalls the hook.
                 thread::sleep(period);
             }
         });
