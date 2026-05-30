@@ -27,6 +27,16 @@ Desktop app:
 cargo run -p openlogi-gui --release
 ```
 
+On macOS the desktop binary is launched from inside a throwaway
+`target/dev/OpenLogi.app` — a Cargo `runner` wired in `.cargo/config.toml`
+(`scripts/cargo-run-macos.sh`). This makes the dev build show the real
+**OpenLogi** name in the menu bar and the app icon in the Dock; a bare
+`cargo run` binary has no bundle, so macOS would otherwise fall back to the
+`openlogi-gui` executable name and a generic icon. The binary is hardlinked in
+(no copy) and the icon is generated once by `scripts/macos-icns.sh`. The runner
+is a transparent passthrough for everything else (the CLI, tests); set
+`OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-gui` binary instead.
+
 To install the CLI binary on `PATH`:
 
 ```sh
