@@ -33,9 +33,6 @@ jobs:
           export-env: true
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          # Store OP_APPLE_SECRET_ITEM as the 1Password item reference, e.g.
-          # op://OpenLogi/Release. Field names stay aligned with the exported
-          # environment variable names below.
           APPLE_SIGNING_IDENTITY: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_SIGNING_IDENTITY
           APPLE_CERTIFICATE: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_CERTIFICATE
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_CERTIFICATE_PASSWORD
@@ -60,10 +57,31 @@ jobs:
           : "${APPLE_TEAM_ID:?Configure APPLE_TEAM_ID in GitHub Secrets}"
 
       - name: Import Apple signing certificate
-        uses: apple-actions/import-codesign-certs@v7
-        with:
-          p12-file-base64: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE }}
-          p12-password: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/openlogi-signing.keychain-db"
+          cert_path="$RUNNER_TEMP/openlogi-signing.p12"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert_path"
+
+          security create-keychain -p "$RUNNER_TEMP" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$RUNNER_TEMP" "$keychain"
+          security import "$cert_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$RUNNER_TEMP" \
+            "$keychain"
+          security list-keychains -d user -s \
+            "$keychain" \
+            $(security list-keychains -d user | sed 's/[" ]//g')
+          security find-identity -v -p codesigning "$keychain"
 
       - name: Build OpenLogi.app with cargo-bundle
         run: |
