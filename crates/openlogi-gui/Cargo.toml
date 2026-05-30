@@ -48,7 +48,7 @@ workspace = true
 # (OPENLOGI_BUNDLE_ASSETS=1).
 [package.metadata.bundle]
 name = "OpenLogi"
-identifier = "dev.openlogi.openlogi"
+identifier = "org.openlogi.OpenLogi"
 version = "0.0.1"
 category = "public.app-category.utilities"
 short_description = "Lightweight local-first companion for Logitech HID++ peripherals."

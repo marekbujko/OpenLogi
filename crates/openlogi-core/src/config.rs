@@ -58,7 +58,7 @@ impl Default for Config {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
     /// When true, a macOS `LaunchAgent` plist at
-    /// `~/Library/LaunchAgents/dev.openlogi.openlogi.plist` is installed
+    /// `~/Library/LaunchAgents/org.openlogi.OpenLogi.plist` is installed
     /// so the app starts on login (P2.2). The plist is reconciled with
     /// this field on every startup; flipping the flag and relaunching is
     /// enough to install / remove it.

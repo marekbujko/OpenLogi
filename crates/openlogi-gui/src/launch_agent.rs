@@ -1,7 +1,7 @@
 //! macOS `LaunchAgent` reconciliation.
 //!
 //! When `Config::app_settings.launch_at_login` is `true`, a plist at
-//! `~/Library/LaunchAgents/dev.openlogi.openlogi.plist` is kept in sync
+//! `~/Library/LaunchAgents/org.openlogi.OpenLogi.plist` is kept in sync
 //! with the currently running executable so the next user-login session
 //! relaunches OpenLogi automatically. Setting the flag to `false`
 //! removes the plist on the next startup.
@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 /// Stable launch-agent identifier — matches the bundle id in
 /// `crates/openlogi-gui/Cargo.toml [package.metadata.bundle]`.
-const LABEL: &str = "dev.openlogi.openlogi";
+const LABEL: &str = "org.openlogi.OpenLogi";
 
 /// Reconcile the on-disk `LaunchAgent` plist with `enabled`. Idempotent:
 /// no-op when the file already matches the desired state.
