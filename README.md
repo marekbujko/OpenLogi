@@ -1,3 +1,6 @@
+> [!WARNING]
+> **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified the moment a release lands.
+
 <h4 align="right"><strong>English</strong> | <a href="README_CN.md">简体中文</a></h4>
 
 <p align="center">
