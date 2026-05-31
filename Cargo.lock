@@ -2465,7 +2465,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-updater"
-version = "0.0.1"
+version = "0.0.2"
+source = "git+https://github.com/AprilNEA/gpui-updater?tag=v0.0.2#b58381994394b2824795dcbc9ddd0df733b3148c"
 dependencies = [
  "gpui",
  "minisign-verify",
