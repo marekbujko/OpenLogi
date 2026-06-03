@@ -164,6 +164,8 @@ mod tests {
         ); // parameterized action label
         assert_eq!(rust_i18n::t!("Quit OpenLogi"), "退出 OpenLogi"); // menu-bar status item
         assert_eq!(rust_i18n::t!("No devices connected"), "未连接设备"); // menu-bar device line
+        assert_eq!(rust_i18n::t!("Lighting"), "灯光"); // keyboard lighting tab
+        assert_eq!(rust_i18n::t!("BRIGHTNESS"), "亮度"); // lighting panel label
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,

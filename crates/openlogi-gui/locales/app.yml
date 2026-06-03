@@ -38,6 +38,38 @@ _version: 2
   zh-HK: 指標
   zh-TW: 指標
 
+# Keyboard lighting tab + panel (app.rs, components/lighting_panel.rs)
+"Lighting":
+  ja: ライト
+  ru: "Подсветка"
+  zh-CN: 灯光
+  zh-HK: 燈光
+  zh-TW: 燈光
+"LIGHTING":
+  ja: ライト
+  ru: "ПОДСВЕТКА"
+  zh-CN: 灯光
+  zh-HK: 燈光
+  zh-TW: 燈光
+"BRIGHTNESS":
+  ja: 明るさ
+  ru: "ЯРКОСТЬ"
+  zh-CN: 亮度
+  zh-HK: 亮度
+  zh-TW: 亮度
+"On":
+  ja: オン
+  ru: "Вкл"
+  zh-CN: 开
+  zh-HK: 開
+  zh-TW: 開
+"Off":
+  ja: オフ
+  ru: "Выкл"
+  zh-CN: 关
+  zh-HK: 關
+  zh-TW: 關
+
 # ── Menu-bar status item (platform/menubar.rs) ──────────────────────────────
 "Open OpenLogi":
   ja: OpenLogi を開く

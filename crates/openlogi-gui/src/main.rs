@@ -222,7 +222,7 @@ fn main() -> Result<()> {
                     platform::tray::hide_from_dock();
                 }
                 #[cfg(target_os = "macos")]
-                platform::tray::set_device_status(&tray_status(cx));
+                platform::tray::set_device_lines(&tray_device_lines(cx));
             });
 
             // First launch only: offer to opt in to the update check, since it
@@ -259,7 +259,7 @@ fn main() -> Result<()> {
                                 state.scanning = false;
                             });
                             #[cfg(target_os = "macos")]
-                            platform::tray::set_device_status(&tray_status(cx));
+                            platform::tray::set_device_lines(&tray_device_lines(cx));
                         });
                     }
                     Some(bundle) = app_rx.recv() => {
@@ -312,7 +312,7 @@ fn main() -> Result<()> {
                     platform::tray::TrayEvent::Quit => cx.quit(),
                     platform::tray::TrayEvent::Refresh => {
                         platform::tray::refresh_labels();
-                        platform::tray::set_device_status(&tray_status(cx));
+                        platform::tray::set_device_lines(&tray_device_lines(cx));
                     }
                 });
             }
@@ -403,16 +403,17 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
 /// Format the status-item device line from the live [`AppState`], e.g.
 /// `"MX Master 3S · 80%"`, or a placeholder when nothing is connected.
 #[cfg(target_os = "macos")]
-fn tray_status(cx: &gpui::App) -> String {
-    cx.try_global::<AppState>()
-        .and_then(AppState::current_record)
-        .map_or_else(
-            || rust_i18n::t!("No devices connected").into_owned(),
-            |record| match &record.battery {
+fn tray_device_lines(cx: &gpui::App) -> Vec<String> {
+    cx.try_global::<AppState>().map_or_else(Vec::new, |state| {
+        state
+            .device_list
+            .iter()
+            .map(|record| match &record.battery {
                 Some(battery) => format!("{} · {}%", record.display_name, battery.percentage),
                 None => record.display_name.clone(),
-            },
-        )
+            })
+            .collect()
+    })
 }
 
 /// Load config from disk and build the initial hook-shared state using the

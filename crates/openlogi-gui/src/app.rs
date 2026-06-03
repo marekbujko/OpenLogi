@@ -26,6 +26,7 @@ use crate::app_menu::{Minimize, Zoom};
 use crate::asset::AssetResolver;
 use crate::components::carousel::Carousel;
 use crate::components::dpi_panel::DpiPanel;
+use crate::components::lighting_panel::LightingPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
 use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
@@ -50,28 +51,79 @@ enum Route {
 }
 
 /// The active section of the device-detail screen. Backs the detail `TabBar`;
-/// reset to [`DetailTab::Buttons`] whenever a device is opened.
+/// reset to the device's first tab whenever a device is opened.
+///
+/// The tab *set* depends on the device kind — see [`DetailTab::tabs_for`]. A
+/// mouse gets button-mapping + pointer tuning; a wired keyboard gets RGB
+/// lighting; every device gets the info tab. Tailoring the tabs is what keeps a
+/// keyboard from rendering a mouse silhouette and an irrelevant DPI panel
+/// (issue #19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
     /// Pointer tuning — DPI and presets.
     Pointer,
+    /// RGB lighting — color, brightness, on/off.
+    Lighting,
     /// Device info and configuration.
     Device,
 }
 
 impl DetailTab {
-    /// Tab order, matching the `TabBar` child order.
-    const ORDER: [Self; 3] = [Self::Buttons, Self::Pointer, Self::Device];
-
-    fn index(self) -> usize {
-        Self::ORDER.iter().position(|t| *t == self).unwrap_or(0)
+    /// The detail sections shown for `record`, in tab order. Always non-empty:
+    /// every device gets at least the info tab.
+    fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
+        let mut tabs = Vec::new();
+        if is_configurable_pointer(record.kind) {
+            tabs.push(Self::Buttons);
+            tabs.push(Self::Pointer);
+        }
+        if supports_lighting(record) {
+            tabs.push(Self::Lighting);
+        }
+        tabs.push(Self::Device);
+        tabs
     }
 
-    fn from_index(ix: usize) -> Self {
-        Self::ORDER.get(ix).copied().unwrap_or(Self::Buttons)
+    /// The first (default) tab for `record` — what a freshly opened device shows.
+    fn default_for(record: &DeviceRecord) -> Self {
+        Self::tabs_for(record)
+            .first()
+            .copied()
+            .unwrap_or(Self::Device)
     }
+
+    fn label(self) -> SharedString {
+        match self {
+            Self::Buttons => tr!("Buttons"),
+            Self::Pointer => tr!("Pointer"),
+            Self::Lighting => tr!("Lighting"),
+            Self::Device => tr!("Device"),
+        }
+    }
+}
+
+/// Whether a device drives the mouse model + DPI panel. Other kinds (keyboards,
+/// numpads, headsets…) don't get a mouse silhouette that doesn't describe them
+/// (issue #19); they fall back to the info tab — and, for wired keyboards, the
+/// lighting tab.
+fn is_configurable_pointer(kind: DeviceKind) -> bool {
+    matches!(kind, DeviceKind::Mouse | DeviceKind::Trackball)
+}
+
+/// Whether to offer the RGB lighting tab. A `Keyboard` is always a keyboard;
+/// wired G-series keyboards, though, enumerate as `Unknown` over the direct
+/// (USB) path (it carries no codename or kind), so a direct-attached `Unknown`
+/// counts too.
+///
+/// [`openlogi_hid::set_keyboard_color`] only drives the *wired* path today (it
+/// opens a raw USB writer), so a Bolt/Unifying-paired keyboard's writes no-op
+/// until a wireless lighting path lands — the tab still persists the config.
+fn supports_lighting(record: &DeviceRecord) -> bool {
+    matches!(record.kind, DeviceKind::Keyboard)
+        || (matches!(record.kind, DeviceKind::Unknown)
+            && matches!(record.route, Some(DeviceRoute::Direct { .. })))
 }
 
 /// Root application view.
@@ -79,6 +131,7 @@ pub struct AppView {
     route: Route,
     mouse_model: Entity<MouseModelView>,
     dpi_panel: Entity<DpiPanel>,
+    lighting_panel: Entity<LightingPanel>,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Re-renders the root when the device list changes so the empty state
@@ -124,11 +177,13 @@ impl AppView {
 
         let mouse_model = cx.new(MouseModelView::new);
         let dpi_panel = cx.new(DpiPanel::new);
+        let lighting_panel = cx.new(LightingPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
             route: Route::Home,
             mouse_model,
             dpi_panel,
+            lighting_panel,
             appearance_obs: None,
             state_obs,
             accessibility_dismissed: false,
@@ -156,7 +211,12 @@ impl AppView {
             }
         });
         self.route = Route::Device { config_key };
-        self.active_tab = DetailTab::Buttons;
+        // Land on the device's first relevant tab — Buttons for a mouse,
+        // Lighting for a wired keyboard, Device for everything else.
+        self.active_tab = cx
+            .try_global::<AppState>()
+            .and_then(AppState::current_record)
+            .map_or(DetailTab::Device, DetailTab::default_for);
         cx.notify();
     }
 
@@ -284,8 +344,15 @@ impl Render for AppView {
         let (header_el, content_el) = if show_device {
             (
                 detail_header(pal, cx).into_any_element(),
-                detail_content(&self.mouse_model, &self.dpi_panel, self.active_tab, pal, cx)
-                    .into_any_element(),
+                detail_content(
+                    &self.mouse_model,
+                    &self.dpi_panel,
+                    &self.lighting_panel,
+                    self.active_tab,
+                    pal,
+                    cx,
+                )
+                .into_any_element(),
             )
         } else {
             (
@@ -649,40 +716,61 @@ fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
         )
 }
 
-/// The device-detail body: a tab bar over three sections (buttons / pointer /
-/// device), with the active section filling the rest of the screen.
+/// The device-detail body: a tab bar over the active device's sections (which
+/// vary by kind — see [`DetailTab::tabs_for`]), with the active section filling
+/// the rest of the screen.
 fn detail_content(
     mouse_model: &Entity<MouseModelView>,
     dpi_panel: &Entity<DpiPanel>,
+    lighting_panel: &Entity<LightingPanel>,
     active: DetailTab,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let tabs = cx
+        .try_global::<AppState>()
+        .and_then(AppState::current_record)
+        .map_or_else(|| vec![DetailTab::Device], DetailTab::tabs_for);
+    // The stored tab may not belong to this device — e.g. it lingered across a
+    // hot-plug onto a different kind. Fall back to the device's first tab.
+    let active = if tabs.contains(&active) {
+        active
+    } else {
+        tabs.first().copied().unwrap_or(DetailTab::Device)
+    };
     let content = match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, pal).into_any_element(),
+        DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     };
     v_flex()
         .flex_1()
         .w_full()
         .min_h_0()
-        .child(detail_tab_bar(active, cx))
+        .child(detail_tab_bar(&tabs, active, cx))
         .child(content)
 }
 
-/// The detail screen's tab bar. Clicking a tab swaps the active section.
-fn detail_tab_bar(active: DetailTab, cx: &mut Context<AppView>) -> impl IntoElement {
+/// The detail screen's tab bar, built from the active device's tab set. Clicking
+/// a tab swaps the active section.
+fn detail_tab_bar(
+    tabs: &[DetailTab],
+    active: DetailTab,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let active_ix = tabs.iter().position(|t| *t == active).unwrap_or(0);
+    // Owned copy so the click handler can map a clicked index back to its tab
+    // without borrowing the caller's slice.
+    let order = tabs.to_vec();
     div().w_full().px_5().pt_3().child(
         TabBar::new("detail-tabs")
             .underline()
             .w_full()
-            .selected_index(active.index())
-            .child(tr!("Buttons"))
-            .child(tr!("Pointer"))
-            .child(tr!("Device"))
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.active_tab = DetailTab::from_index(*ix);
+            .selected_index(active_ix)
+            .children(tabs.iter().map(|t| t.label()))
+            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                this.active_tab = order.get(*ix).copied().unwrap_or(DetailTab::Device);
                 cx.notify();
             })),
     )
@@ -720,6 +808,24 @@ fn pointer_tab(dpi_panel: &Entity<DpiPanel>, pal: Palette) -> impl IntoElement {
             IconName::Settings,
             pal,
             dpi_panel.clone().into_any_element(),
+        )))
+}
+
+/// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
+/// card. Only reached for wired keyboards — see [`supports_lighting`].
+fn lighting_tab(lighting_panel: &Entity<LightingPanel>, pal: Palette) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .overflow_y_scrollbar()
+        .p_6()
+        .child(div().w_full().max_w(px(560.)).child(panel_card(
+            tr!("Lighting"),
+            IconName::Palette,
+            pal,
+            lighting_panel.clone().into_any_element(),
         )))
 }
 
