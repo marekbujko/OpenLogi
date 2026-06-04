@@ -847,6 +847,10 @@ pub fn post_horizontal_scroll(delta: i32) {
     #[cfg(target_os = "macos")]
     macos::post_horizontal_scroll(delta);
 
+    // `delta` is already in "one line per rotation increment" units (see doc
+    // above), which matches REL_HWHEEL's convention of one unit per detent.
+    // This is intentionally different from Action::HorizontalScrollLeft/Right,
+    // which hardcode ±3 as a fixed "scroll tick" with no device delta involved.
     #[cfg(target_os = "linux")]
     linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, delta);
 
@@ -1520,7 +1524,6 @@ mod linux {
         }
         None
     }
-
 
     /// Convert a [`KeyCombo`] modifier bitmask to the evdev keys to hold.
     ///
