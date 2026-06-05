@@ -369,7 +369,11 @@ static X11_STATE: LazyLock<Option<X11State>> = LazyLock::new(|| {
         .reply()
         .ok()?
         .atom;
-    Some(X11State { conn, root, net_active_window })
+    Some(X11State {
+        conn,
+        root,
+        net_active_window,
+    })
 });
 
 /// Return the X11 `WM_CLASS` class component of the currently active window,
@@ -384,7 +388,14 @@ pub(crate) fn frontmost_bundle_id() -> Option<String> {
     // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
     let window: Window = state
         .conn
-        .get_property(false, state.root, state.net_active_window, AtomEnum::WINDOW, 0, 1)
+        .get_property(
+            false,
+            state.root,
+            state.net_active_window,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )
         .ok()?
         .reply()
         .ok()?
@@ -397,7 +408,10 @@ pub(crate) fn frontmost_bundle_id() -> Option<String> {
     // WM_CLASS is instance_name\0class_name\0; the class component is more
     // stable across window instances and is what profiles should key on
     // (e.g. "Firefox", not "Navigator").
-    let wm = WmClass::get(&state.conn, window).ok()?.reply_unchecked().ok()??;
+    let wm = WmClass::get(&state.conn, window)
+        .ok()?
+        .reply_unchecked()
+        .ok()??;
     std::str::from_utf8(wm.class())
         .ok()
         .filter(|s| !s.is_empty())

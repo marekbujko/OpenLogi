@@ -10,18 +10,16 @@
 //! ./target/debug/examples/frontmost_app
 //! ```
 
+#[cfg(target_os = "linux")]
 fn main() {
-    #[cfg(not(target_os = "linux"))]
-    {
-        eprintln!("frontmost_app: Linux only");
-        return;
+    println!("Polling focused app every second — switch windows to test.");
+    loop {
+        println!("{:?}", openlogi_hook::frontmost_bundle_id());
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    #[cfg(target_os = "linux")]
-    {
-        println!("Polling focused app every second — switch windows to test.");
-        loop {
-            println!("{:?}", openlogi_hook::frontmost_bundle_id());
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("frontmost_app is a Linux-only smoke test (no-op on this platform).");
 }
