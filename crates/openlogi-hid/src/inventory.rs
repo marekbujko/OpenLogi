@@ -143,8 +143,11 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             "paired slot"
         );
 
+        // The pairing register already supplies a kind here, so only spend a
+        // `0x0005` round-trip when it came back `Unknown` (see `probe_features`).
+        let register_kind = map_kind(bolt_kind);
         let (battery, model_info, probed_kind) = if online {
-            probe_features(&channel, slot).await
+            probe_features(&channel, slot, register_kind == DeviceKind::Unknown).await
         } else {
             (None, None, None)
         };
@@ -152,7 +155,7 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             slot,
             codename,
             wpid,
-            kind: resolve_device_kind(map_kind(bolt_kind), probed_kind),
+            kind: resolve_device_kind(register_kind, probed_kind),
             online,
             battery,
             model_info,
@@ -192,7 +195,9 @@ async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &async_hid::DeviceInfo,
 ) -> Option<DeviceInventory> {
-    let (battery, model_info, probed_kind) = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
+    // The receiver-less path has no pairing register, so always ask `0x0005`.
+    let (battery, model_info, probed_kind) =
+        probe_features(&channel, DIRECT_DEVICE_INDEX, true).await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or wired, which
     // reports none but still exposes a control feature (adjustable DPI or
@@ -286,14 +291,18 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
 }
 
 /// Open a HID++ session for `slot` and query the features we care about
-/// (battery, device-information, device-type) in one shot. Returns
-/// `(battery, model, kind)` — any field may be `None` if the device doesn't
-/// expose that feature or the read fails. Device sessions are expensive
-/// (multi-round-trip) so we fold every read through the same `Device::new` +
-/// `enumerate_features`.
+/// (battery, device-information, and — when `read_device_type` — the `0x0005`
+/// device type) in one shot. Returns `(battery, model, kind)`; any field may be
+/// `None` if the device doesn't expose that feature or the read fails. Device
+/// sessions are expensive (multi-round-trip) so we fold every read through the
+/// same `Device::new` + `enumerate_features`.
+///
+/// `read_device_type` is `false` on the Bolt path when the pairing register
+/// already gave a concrete kind, so the common case spends no extra round-trip.
 async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
+    read_device_type: bool,
 ) -> (
     Option<BatteryInfo>,
     Option<DeviceModelInfo>,
@@ -362,16 +371,20 @@ async fn probe_features(
 
     // `0x0005` reports the device's marketing type (mouse, keyboard, …). On the
     // direct path this is the only kind signal; on the Bolt path it backstops a
-    // pairing register that reported `Unknown`.
-    let kind = match device.get_feature::<DeviceTypeAndNameFeature>() {
-        Some(feature) => match feature.get_device_type().await {
+    // pairing register that reported `Unknown`. Skipped otherwise to avoid a
+    // round-trip the caller would only discard.
+    let kind = match (
+        read_device_type,
+        device.get_feature::<DeviceTypeAndNameFeature>(),
+    ) {
+        (true, Some(feature)) => match feature.get_device_type().await {
             Ok(ty) => Some(map_device_type(ty)),
             Err(e) => {
                 debug!(slot, error = ?e, "DeviceType read failed");
                 None
             }
         },
-        None => None,
+        _ => None,
     };
 
     (battery, model_info, kind)
