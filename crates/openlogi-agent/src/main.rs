@@ -1,12 +1,17 @@
 //! OpenLogi background agent — headless, always-on.
 //!
 //! Owns the CGEventTap hook and the HID++ device path (gesture capture, DPI,
-//! SmartShift), driven by `config.toml` and live device inventory. Phase 1: no
-//! IPC — it reads the config once at startup and applies it; the GUI talks to it
-//! over IPC in a later phase, which is also where live config reload lands.
+//! SmartShift), serves the GUI over a Unix-socket tarpc IPC, reconciles its own
+//! launchd autostart, and (macOS) hosts the menu-bar status item. The async
+//! core runs on a tokio runtime; on macOS the process main thread hosts the
+//! AppKit run loop the menu bar requires.
 
 mod launch_agent;
 mod server;
+#[cfg(target_os = "macos")]
+mod status_item;
+#[cfg(target_os = "macos")]
+mod tray;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +45,23 @@ fn main() {
             return;
         }
     };
+
+    // macOS hosts the menu-bar item, which needs an NSApplication run loop on
+    // the process main thread — so the async core (orchestrator, IPC, watchers,
+    // hook) runs on the tokio runtime on a dedicated thread, and the main thread
+    // runs AppKit. Elsewhere there is no tray, so just block on the core.
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = std::thread::Builder::new()
+            .name("openlogi-agent-core".into())
+            .spawn(move || runtime.block_on(run(config)))
+        {
+            warn!(error = %e, "could not spawn the agent core thread; exiting");
+            return;
+        }
+        tray::run_app_loop();
+    }
+    #[cfg(not(target_os = "macos"))]
     runtime.block_on(run(config));
 }
 

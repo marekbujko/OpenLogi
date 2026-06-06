@@ -4641,6 +4641,9 @@ name = "openlogi-agent"
 version = "0.5.1"
 dependencies = [
  "futures",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "openlogi-agent-core",
  "openlogi-core",
  "openlogi-hid",
