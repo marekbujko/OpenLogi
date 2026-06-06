@@ -13,12 +13,11 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex,
 };
-use openlogi_core::config::Config;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind,
 };
 use openlogi_hid::DeviceRoute;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::app_menu::{Minimize, Zoom};
 use crate::asset::AssetResolver;
@@ -145,20 +144,11 @@ pub struct AppView {
 
 impl AppView {
     /// Construct the root view and its child entities.
-    pub fn new(inventories: &[DeviceInventory], cx: &mut Context<Self>) -> Self {
-        let config = match Config::load_or_default() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "could not load config.toml — starting with defaults");
-                Config::default()
-            }
-        };
-
+    pub fn new(_inventories: &[DeviceInventory], cx: &mut Context<Self>) -> Self {
         let cache = AssetResolver::new();
-
-        if !cx.has_global::<AppState>() {
-            cx.set_global(AppState::with_runtime(config, inventories, &cache));
-        }
+        // `AppState` is installed as a global by `main` (with the IPC command
+        // sender) before any window opens; downstream reads use `try_global`
+        // and tolerate its absence, so there's no fallback construction here.
 
         if let Some(state) = cx.try_global::<AppState>() {
             if let Some(record) = state.current_record() {

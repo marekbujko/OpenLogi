@@ -25,7 +25,6 @@ use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartS
 
 use crate::state::{AppState, SmartShiftLoad};
 use crate::theme::{self, ACCENT_BLUE, Palette};
-use openlogi_agent_core::hardware::read_smartshift_status_blocking;
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps), but realistic scroll speeds sit well
@@ -102,14 +101,23 @@ impl SmartShiftPanel {
         };
 
         cx.update_global::<AppState, _>(|state, _| state.mark_smartshift_loading(&key));
-        let key_for_reset = key.clone();
+        // Read through the agent over IPC (it owns device I/O); wrap the error
+        // so the panel's existing retry/cache logic still applies.
+        let sender = cx.global::<AppState>().ipc_sender();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let result = read_smartshift_status_blocking(&route);
-            let _ = tx.send((key, route, result));
-        });
+        if sender
+            .send(crate::ipc_client::Command::ReadSmartShift(
+                route.clone(),
+                tx,
+            ))
+            .is_err()
+        {
+            cx.update_global::<AppState, _>(|state, _| state.clear_smartshift_loading(&key));
+            return;
+        }
         cx.spawn(async move |_panel, cx| match rx.await {
-            Ok((key, route, result)) => {
+            Ok(result) => {
+                let result = result.map_err(openlogi_hid::WriteError::Hidpp);
                 cx.update_global::<AppState, _>(|state, cx| {
                     state.store_smartshift_status(key, &route, result);
                     cx.refresh_windows();
@@ -117,7 +125,7 @@ impl SmartShiftPanel {
             }
             Err(_) => {
                 cx.update_global::<AppState, _>(|state, cx| {
-                    state.clear_smartshift_loading(&key_for_reset);
+                    state.clear_smartshift_loading(&key);
                     cx.refresh_windows();
                 });
             }

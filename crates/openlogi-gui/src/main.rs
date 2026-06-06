@@ -29,10 +29,6 @@ mod asset;
 mod components;
 mod data;
 mod i18n;
-#[allow(
-    dead_code,
-    reason = "IPC client; replaces the GUI's in-process device path in the next commit of the daemon split"
-)]
 mod ipc_client;
 mod mouse_model;
 mod platform;
@@ -45,8 +41,8 @@ mod windows;
 // gpui-component ships, so the framework's own widgets localize alongside ours.
 rust_i18n::i18n!("locales", fallback = "en");
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -57,13 +53,11 @@ use gpui::{
 use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
-use openlogi_hook::Hook;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
-use crate::state::{AppState, DpiCycleState};
-use openlogi_agent_core::hook_runtime::{self, BindingMap};
+use crate::state::AppState;
 use openlogi_agent_core::watchers;
 
 #[allow(
@@ -95,42 +89,24 @@ fn main() -> Result<()> {
     // when the first devices appear (see the `inventory_rx` arm).
     let inventories: Vec<DeviceInventory> = Vec::new();
 
-    let (hook_bindings, gesture_bindings, dpi_cycle, initial_config) =
-        load_config_and_bindings(&inventories);
-    // The capture session publishes its open HID++ channel here so DPI /
-    // SmartShift writes reuse it instead of opening their own.
-    let capture_channel: openlogi_hid::CaptureChannel = Arc::new(RwLock::new(None));
-    // Thumb-wheel sensitivity, shared between the gesture watcher (reader) and
-    // the GPUI-owned `AppState` (writer). Created here so both sides hold the
-    // same atomic from the first event.
-    let thumbwheel_sensitivity = Arc::new(std::sync::atomic::AtomicI32::new(
-        initial_config.app_settings.thumbwheel_sensitivity,
-    ));
-    let hook_arcs = (
-        Arc::clone(&hook_bindings),
-        Arc::clone(&dpi_cycle),
-        Arc::clone(&capture_channel),
-    );
+    let initial_config = Config::load_or_default().unwrap_or_else(|e| {
+        warn!(error = %e, "could not load config.toml; using defaults");
+        Config::default()
+    });
 
     // Resolve the UI locale before any menu or window is built so the first
     // frame already renders in the right language.
     i18n::apply(&initial_config.app_settings);
 
-    // HID++ control capture (gesture button, DPI/ModeShift button, thumb wheel)
-    // runs independently of the CGEventTap hook — it needs no Accessibility
-    // permission — so start it up front for the active device.
-    watchers::gesture::spawn(
-        Arc::clone(&hook_bindings),
-        Arc::clone(&gesture_bindings),
-        Arc::clone(&dpi_cycle),
-        Arc::clone(&capture_channel),
-        Arc::clone(&thumbwheel_sensitivity),
-    );
+    // The always-on agent owns the hook, the HID++ capture, and all device I/O.
+    // The GUI is a client: it polls inventory + status and forwards device
+    // commands over IPC. Started here so the first poll is already in flight.
+    let ipc_client::IpcClient {
+        updates: mut ipc_updates,
+        commands: ipc_commands,
+    } = ipc_client::spawn(std::time::Duration::from_secs(2));
 
-    let mut inventory_rx = watchers::inventory::spawn(std::time::Duration::from_secs(2));
-    let mut app_rx = watchers::foreground_app::spawn(std::time::Duration::from_secs(1));
-    let mut accessibility_rx =
-        watchers::accessibility::spawn(std::time::Duration::from_millis(1200));
+    // Pairing still runs in the GUI for now (modal, user-initiated).
     let (pairing_ctrl_tx, mut pairing_evt_rx) = watchers::pairing::spawn();
 
     // Status-item (tray) click events (Open / Quit), drained by a dedicated
@@ -168,10 +144,6 @@ fn main() -> Result<()> {
         // Device window's buttons can drive the watcher via globals.
         cx.set_global(windows::add_device::PairingControl(pairing_ctrl_tx));
         cx.set_global(windows::add_device::PairingUi::Idle);
-
-        if !Hook::has_accessibility() {
-            Hook::prompt_accessibility();
-        }
 
         // Publish the shared updater and, if the user opted in, run one
         // check on launch. Done before `initial_config` is moved into the
@@ -216,14 +188,11 @@ fn main() -> Result<()> {
             cx.update(|cx| {
                 if !cx.has_global::<AppState>() {
                     let cache = asset::AssetResolver::new();
-                    cx.set_global(AppState::with_runtime_shared(
+                    cx.set_global(AppState::with_runtime(
                         initial_config,
                         &inventories,
                         &cache,
-                        hook_bindings,
-                        gesture_bindings,
-                        dpi_cycle,
-                        thumbwheel_sensitivity,
+                        ipc_commands,
                     ));
                 }
                 if !start_minimized {
@@ -249,37 +218,31 @@ fn main() -> Result<()> {
                 }
             });
 
-            let mut hook_handle = None;
-            // Asset depots are fetched in the background when devices first
-            // appear — startup no longer blocks on it. The sync runs once on
-            // success; a failed attempt is retried (see SYNC_*) with a
-            // growing, capped delay so a permanently-down host isn't polled
-            // every tick yet a recovered one still self-heals.
+            // Asset depots are fetched in the background when devices with
+            // model info first appear — startup no longer blocks on it. The
+            // sync runs once on success; a failed attempt is retried (see
+            // SYNC_*) with a growing, capped delay so a permanently-down host
+            // isn't polled every tick yet a recovered one still self-heals.
             let sync_state = Arc::new(AtomicU8::new(SYNC_IDLE));
             let mut sync_attempts: u32 = 0;
             let mut last_sync_at: Option<Instant> = None;
             loop {
                 tokio::select! {
-                    Some(new_inv) = inventory_rx.recv() => {
-                        // Kick off (or retry) the one-shot asset sync. Gate on a
-                        // snapshot that actually carries model info — `!is_empty()`
-                        // alone could fire on a device whose DeviceInformation read
-                        // hasn't resolved yet, leaving its art un-synced. `RUNNING`
-                        // blocks a second concurrent sync; `DONE` latches it off;
-                        // `FAILED` retries once its backoff window elapses, so a
-                        // transient network error no longer strands the device on
-                        // the silhouette until an app restart.
+                    Some(update) = ipc_updates.recv() => {
+                        // Kick off (or retry) the one-shot asset sync once a
+                        // snapshot carries model info (an empty / unresolved one
+                        // would strand the device on the silhouette).
                         let state = sync_state.load(Ordering::Acquire);
                         let backoff_passed = last_sync_at
                             .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
                         if matches!(state, SYNC_IDLE | SYNC_FAILED)
                             && backoff_passed
-                            && !collect_models(&new_inv).is_empty()
+                            && !collect_models(&update.inventory).is_empty()
                         {
                             sync_attempts = sync_attempts.saturating_add(1);
                             last_sync_at = Some(Instant::now());
                             sync_state.store(SYNC_RUNNING, Ordering::Release);
-                            let inv = new_inv.clone();
+                            let inv = update.inventory.clone();
                             let state = Arc::clone(&sync_state);
                             std::thread::spawn(move || {
                                 let next = if sync_assets_if_needed(&inv) {
@@ -293,40 +256,15 @@ fn main() -> Result<()> {
                         cx.update(|cx| {
                             let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
-                                state.refresh_inventories(&new_inv, &cache);
+                                state.refresh_inventories(&update.inventory, &cache);
                                 state.scanning = false;
+                                state.accessibility_granted =
+                                    update.status.accessibility_granted;
                             });
+                            cx.refresh_windows();
                             #[cfg(target_os = "macos")]
                             platform::tray::set_device_lines(&tray_device_lines(cx));
                         });
-                    }
-                    Some(bundle) = app_rx.recv() => {
-                        cx.update(|cx| {
-                            cx.update_global::<AppState, _>(|state, _| {
-                                state.set_current_app(bundle);
-                            });
-                        });
-                    }
-                    Some(granted) = accessibility_rx.recv() => {
-                        if !granted {
-                            hook_handle = None;
-                        }
-                        cx.update(|cx| {
-                            if cx.has_global::<AppState>() {
-                                cx.update_global::<AppState, _>(|state, _| {
-                                    state.accessibility_granted = granted;
-                                });
-                            }
-                            cx.refresh_windows();
-                        });
-                        if granted && hook_handle.is_none() {
-                            info!("accessibility granted — installing OS mouse hook");
-                            hook_handle = hook_runtime::start(
-                                Arc::clone(&hook_arcs.0),
-                                Arc::clone(&hook_arcs.1),
-                                Arc::clone(&hook_arcs.2),
-                            );
-                        }
                     }
                     Some(event) = pairing_evt_rx.recv() => {
                         cx.update(|cx| {
@@ -481,37 +419,6 @@ fn tray_device_lines(cx: &gpui::App) -> Vec<String> {
             })
             .collect()
     })
-}
-
-/// Load config from disk and build the initial hook-shared state using the
-/// same selection and binding rules as [`AppState::with_runtime_shared`].
-/// Pre-populating these `Arc`s here means the hook and gesture watcher see the
-/// right bindings, gestures, *and* DPI presets from the very first event, well
-/// before the GPUI global is installed.
-fn load_config_and_bindings(
-    inventories: &[DeviceInventory],
-) -> (
-    BindingMap,
-    watchers::gesture::GestureBindings,
-    Arc<RwLock<DpiCycleState>>,
-    Config,
-) {
-    let config = match Config::load_or_default() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "could not load config.toml; using default bindings");
-            Config::default()
-        }
-    };
-
-    let cache = asset::AssetResolver::new();
-    let (bindings, gesture_bindings, dpi_cycle) =
-        AppState::initial_hook_state(&config, inventories, &cache);
-    let bindings_arc = Arc::new(RwLock::new(bindings));
-    let gesture_arc = Arc::new(RwLock::new(gesture_bindings));
-    let dpi_cycle_arc = Arc::new(RwLock::new(dpi_cycle));
-
-    (bindings_arc, gesture_arc, dpi_cycle_arc, config)
 }
 
 fn init_tracing() {

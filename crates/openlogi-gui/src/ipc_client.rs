@@ -28,26 +28,19 @@ pub struct PollUpdate {
     pub status: AgentStatus,
 }
 
-/// A device command sent from the GPUI thread to the client thread. Each
-/// request-shaped variant carries a `oneshot` for the reply; the fire-and-forget
-/// variants carry none.
+/// A device command sent from the GPUI thread to the client thread. Reads carry
+/// a `oneshot` for the reply; "apply now" writes are fire-and-forget (the GUI
+/// updates its display optimistically and the client logs any device failure).
 pub enum Command {
-    SetDpi(DeviceRoute, u32, oneshot::Sender<Result<(), String>>),
-    SetLighting(DeviceRoute, Lighting, oneshot::Sender<Result<(), String>>),
-    SetSmartShift(
-        DeviceRoute,
-        SmartShiftMode,
-        u8,
-        u8,
-        oneshot::Sender<Result<(), String>>,
-    ),
+    SetDpi(DeviceRoute, u32),
+    SetLighting(DeviceRoute, Lighting),
+    SetSmartShift(DeviceRoute, SmartShiftMode, u8, u8),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, String>>),
     ReadSmartShift(
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, String>>,
     ),
     ReloadConfig,
-    RequestAccessibilityPrompt,
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of poll snapshots and a
@@ -146,64 +139,58 @@ async fn handle(client: &mut Option<AgentClient>, cmd: Command) -> Result<(), ()
     };
     let ctx = context::current();
     match cmd {
-        Command::SetDpi(route, dpi, reply) => {
-            let r = client.set_dpi(ctx, route, dpi).await;
-            let _ = reply.send(rpc_result(r)?);
+        Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
+        Command::SetLighting(route, lighting) => {
+            log_apply(client.set_lighting(ctx, route, lighting).await)?;
         }
-        Command::SetLighting(route, lighting, reply) => {
-            let r = client.set_lighting(ctx, route, lighting).await;
-            let _ = reply.send(rpc_result(r)?);
-        }
-        Command::SetSmartShift(route, mode, auto, torque, reply) => {
-            let r = client.set_smartshift(ctx, route, mode, auto, torque).await;
-            let _ = reply.send(rpc_result(r)?);
+        Command::SetSmartShift(route, mode, auto, torque) => {
+            log_apply(client.set_smartshift(ctx, route, mode, auto, torque).await)?;
         }
         Command::ReadDpi(route, reply) => {
-            let r = client.read_dpi(ctx, route).await;
-            let _ = reply.send(rpc_result(r)?);
+            let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
         }
         Command::ReadSmartShift(route, reply) => {
-            let r = client.read_smartshift(ctx, route).await;
-            let _ = reply.send(rpc_result(r)?);
+            let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
-        Command::ReloadConfig => {
-            client.reload_config(ctx).await.map_err(|_| ())?;
-        }
-        Command::RequestAccessibilityPrompt => {
-            client
-                .request_accessibility_prompt(ctx)
-                .await
-                .map_err(|_| ())?;
-        }
+        Command::ReloadConfig => client.reload_config(ctx).await.map_err(|_| ())?,
     }
     Ok(())
 }
 
-/// Unwrap a tarpc transport result: `Err` (connection dropped) propagates so the
-/// caller reconnects; the inner application `Result` is returned for the reply.
+/// A fire-and-forget "apply now": `Err(())` (transport drop) propagates so the
+/// caller reconnects; a device-side failure is logged, not surfaced.
+fn log_apply(r: Result<Result<(), String>, tarpc::client::RpcError>) -> Result<(), ()> {
+    match r {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            warn!(error = %e, "agent rejected device command");
+            Ok(())
+        }
+        Err(_) => Err(()),
+    }
+}
+
+/// Unwrap a tarpc transport result: `Err(())` (connection dropped) propagates so
+/// the caller reconnects; the inner application `Result` is returned for the reply.
 fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     r.map_err(|_| ())
 }
 
-/// Reply to a request-shaped command that the agent is unreachable.
+/// Reply to a read command that the agent is unreachable; writes are
+/// fire-and-forget so they have nothing to reply to.
 #[allow(
     clippy::match_same_arms,
-    reason = "the read arms send the same disconnect error to differently-typed reply channels, so they can't be merged with the write arms"
+    reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
 fn reply_disconnected(cmd: Command) {
     const MSG: &str = "background agent not running";
     match cmd {
-        Command::SetDpi(_, _, reply)
-        | Command::SetLighting(_, _, reply)
-        | Command::SetSmartShift(_, _, _, _, reply) => {
-            let _ = reply.send(Err(MSG.to_string()));
-        }
         Command::ReadDpi(_, reply) => {
             let _ = reply.send(Err(MSG.to_string()));
         }
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(MSG.to_string()));
         }
-        Command::ReloadConfig | Command::RequestAccessibilityPrompt => {}
+        _ => {}
     }
 }

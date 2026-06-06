@@ -15,8 +15,6 @@
 )]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, RwLock};
 
 use gpui::Global;
 use openlogi_core::config::{AppSettings, Config, Lighting};
@@ -24,7 +22,7 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
 };
-use openlogi_hook::Hook;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 mod devices;
@@ -150,24 +148,12 @@ pub struct AppState {
     /// [`Self::set_current_device`] so restarts preserve user bindings and
     /// the last-selected device.
     config: Config,
-    /// Shared binding map consumed by the OS-level hook thread (P0.1). The
-    /// hook holds the other `Arc` clone; writes here are picked up by the next
-    /// hook callback without GPUI thread involvement.
-    pub hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
-    /// Shared DPI-cycle state consumed by the hook thread when dispatching
-    /// [`Action::CycleDpiPresets`] / [`Action::SetDpiPreset`].
-    pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    /// Shared gesture-direction binding map consumed by the gesture watcher
-    /// thread. Mirrors [`Self::hook_bindings`] but keyed by direction; the
-    /// watcher holds the other `Arc` clone, so writes here reach it without
-    /// GPUI involvement.
-    pub gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
-    /// Thumb-wheel sensitivity shared with the gesture watcher thread. The
-    /// watcher reads it on every wheel event to scale scroll speed / action
-    /// thresholds; [`Self::set_thumbwheel_sensitivity`] is the only writer.
-    /// Separate from [`Self::config`]'s persisted copy so the watcher never
-    /// touches the GPUI-owned config.
-    pub thumbwheel_sensitivity: Arc<AtomicI32>,
+    /// Sender to the IPC client thread. The agent owns the hook + all device
+    /// I/O, so binding / setting writes persist to `config.toml` and then send
+    /// [`Command::ReloadConfig`](crate::ipc_client::Command) for the agent to
+    /// rebuild, and "apply now" device changes (DPI / SmartShift / lighting)
+    /// go out as their own commands. The GUI never opens a device itself.
+    ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
 }
 
 impl AppState {
@@ -184,35 +170,7 @@ impl AppState {
         config: Config,
         inventories: &[DeviceInventory],
         cache: &AssetResolver,
-    ) -> Self {
-        let bindings_arc = Arc::new(RwLock::new(BTreeMap::new()));
-        let gesture_arc = Arc::new(RwLock::new(BTreeMap::new()));
-        let cycle_arc = Arc::new(RwLock::new(DpiCycleState::default()));
-        let sensitivity_arc = Arc::new(AtomicI32::new(config.app_settings.thumbwheel_sensitivity));
-        Self::with_runtime_shared(
-            config,
-            inventories,
-            cache,
-            bindings_arc,
-            gesture_arc,
-            cycle_arc,
-            sensitivity_arc,
-        )
-    }
-
-    /// Like [`Self::with_runtime`] but re-uses existing `Arc`s so the hook
-    /// thread and `AppState` share the same maps. Both arcs are rewritten to
-    /// match the resolved initial state so the hook sees correct values from
-    /// the very first captured event.
-    #[must_use]
-    pub fn with_runtime_shared(
-        config: Config,
-        inventories: &[DeviceInventory],
-        cache: &AssetResolver,
-        hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
-        gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
-        dpi_cycle: Arc<RwLock<DpiCycleState>>,
-        thumbwheel_sensitivity: Arc<AtomicI32>,
+        ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     ) -> Self {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
@@ -220,7 +178,9 @@ impl AppState {
             current_device,
             current_app_bundle: None,
             active_button: None,
-            accessibility_granted: Hook::has_accessibility(),
+            // Updated from the agent's IPC `status` poll; the GUI no longer runs
+            // the hook, so it can't meaningfully query Accessibility itself.
+            accessibility_granted: false,
             scanning: true,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
@@ -232,17 +192,26 @@ impl AppState {
             smartshift_load_attempts: BTreeMap::new(),
             device_list,
             config,
-            hook_bindings,
-            dpi_cycle,
-            gesture_hook_bindings,
-            thumbwheel_sensitivity,
+            ipc_commands,
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
-        state.sync_hook_bindings();
-        state.sync_gesture_bindings();
-        state.sync_dpi_cycle();
         state
+    }
+
+    /// Send a device command to the agent over IPC, logging a dropped channel
+    /// (the client thread is gone) rather than surfacing it.
+    fn send_ipc(&self, command: crate::ipc_client::Command) {
+        if self.ipc_commands.send(command).is_err() {
+            warn!("IPC client thread is gone — device command dropped");
+        }
+    }
+
+    /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
+    /// can issue device reads and writes through the agent themselves.
+    #[must_use]
+    pub fn ipc_sender(&self) -> mpsc::UnboundedSender<crate::ipc_client::Command> {
+        self.ipc_commands.clone()
     }
 
     /// Build the button-binding, gesture-binding, and DPI snapshots consumed by
@@ -293,7 +262,6 @@ impl AppState {
         debug!(?bundle, "foreground app changed");
         self.current_app_bundle = bundle;
         self.button_bindings = self.bindings_for_current();
-        self.sync_hook_bindings();
     }
 
     /// The active device, or `None` when [`Self::device_list`] is empty or
@@ -376,9 +344,8 @@ impl AppState {
         self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
-        self.sync_hook_bindings();
-        self.sync_gesture_bindings();
-        self.sync_dpi_cycle();
+        // Display state only — the agent runs its own inventory watcher and
+        // rebuilds the live binding/DPI maps itself.
     }
 
     fn merge_inventory_snapshot(&mut self, new_list: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
@@ -454,14 +421,13 @@ impl AppState {
         self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
-        self.sync_hook_bindings();
-        self.sync_gesture_bindings();
-        self.sync_dpi_cycle();
         let key = self.current_record().map(|r| r.config_key.clone());
         self.config.set_selected_device(key);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist selected device");
         }
+        // The agent owns the hook + device I/O; have it switch devices too.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Replace the DPI preset list for the currently selected device. The
@@ -481,7 +447,7 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist DPI presets to config.toml");
         }
-        self.sync_dpi_cycle();
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Read the DPI preset list for the active device, or an empty `Vec`
@@ -611,7 +577,6 @@ impl AppState {
                         "transient DPI read error — will retry"
                     );
                     self.dpi_by_device.remove(&key);
-                    self.refresh_dpi_cycle_capabilities();
                     return;
                 }
                 self.dpi_load_attempts.remove(&key);
@@ -619,10 +584,6 @@ impl AppState {
             }
         };
         self.dpi_by_device.insert(key, status);
-        // Inject the new capabilities without rebuilding the cycle: discovery
-        // completes at an arbitrary moment and must not reset the cycle index
-        // the way a device switch or preset edit deliberately does.
-        self.refresh_dpi_cycle_capabilities();
     }
 
     /// DPI capabilities for the active device, if discovery succeeded.
@@ -774,14 +735,15 @@ impl AppState {
             return;
         };
         let key = record.config_key.clone();
-        let target = record.route.clone();
-        openlogi_agent_core::hardware::write_smartshift_in_background(
-            None,
-            target,
-            mode,
-            auto_disengage,
-            tunable_torque,
-        );
+        let route = record.route.clone();
+        if let Some(route) = route {
+            self.send_ipc(crate::ipc_client::Command::SetSmartShift(
+                route,
+                mode,
+                auto_disengage,
+                tunable_torque,
+            ));
+        }
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands.
         self.smartshift_by_device.insert(
@@ -811,7 +773,12 @@ impl AppState {
             return;
         };
         let target = self.current_record().and_then(|r| r.route.clone());
-        openlogi_agent_core::hardware::set_lighting_in_background(target, &lighting);
+        if let Some(route) = target {
+            self.send_ipc(crate::ipc_client::Command::SetLighting(
+                route,
+                lighting.clone(),
+            ));
+        }
         self.config.set_lighting(&key, lighting);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist lighting to config.toml");
@@ -891,11 +858,10 @@ impl AppState {
             return;
         }
         self.config.app_settings.thumbwheel_sensitivity = sensitivity;
-        self.thumbwheel_sensitivity
-            .store(sensitivity, Ordering::Relaxed);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist thumbwheel sensitivity");
         }
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Record the answer to the first-run update-check prompt: enable (or leave
@@ -942,21 +908,6 @@ impl AppState {
     pub fn commit_binding(&mut self, button: ButtonId, action: Action) {
         self.button_bindings.insert(button, action.clone());
 
-        // Push into the hook-shared map. A poisoned lock means the hook
-        // thread panicked; log and carry on rather than propagating to the
-        // UI.
-        match self.hook_bindings.write() {
-            Ok(mut guard) => {
-                guard.insert(button, action.clone());
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "hook_bindings lock poisoned — binding change will not reach the hook"
-                );
-            }
-        }
-
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(
                 ?button,
@@ -968,6 +919,8 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist binding to config.toml");
         }
+        // The agent owns the hook; have it rebuild its live map from config.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
@@ -990,18 +943,6 @@ impl AppState {
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
         self.gesture_bindings.insert(direction, action.clone());
 
-        match self.gesture_hook_bindings.write() {
-            Ok(mut guard) => {
-                guard.insert(direction, action.clone());
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "gesture_hook_bindings lock poisoned — change will not reach the watcher"
-                );
-            }
-        }
-
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(
                 ?direction,
@@ -1013,86 +954,8 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist gesture binding to config.toml");
         }
-    }
-
-    /// Mirror [`Self::button_bindings`] into the hook-shared `Arc`. Called
-    /// after the UI-side map changes wholesale (initial build, device
-    /// switch) so the hook thread observes consistent state.
-    fn sync_hook_bindings(&self) {
-        match self.hook_bindings.write() {
-            Ok(mut guard) => {
-                *guard = self.button_bindings.clone();
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "hook_bindings lock poisoned — hook will keep stale bindings"
-                );
-            }
-        }
-    }
-
-    /// Mirror [`Self::gesture_bindings`] into the watcher-shared `Arc`. Called
-    /// alongside [`Self::sync_hook_bindings`] after the gesture map changes
-    /// wholesale (initial build, device switch).
-    fn sync_gesture_bindings(&self) {
-        match self.gesture_hook_bindings.write() {
-            Ok(mut guard) => {
-                *guard = self.gesture_bindings.clone();
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "gesture_hook_bindings lock poisoned — watcher will keep stale bindings"
-                );
-            }
-        }
-    }
-
-    /// Rebuild [`Self::dpi_cycle`] from the active device's stored presets
-    /// and DPI target. Called on initial build, device switch, and preset
-    /// commits. The cycle index resets to 0 since the list contents may
-    /// have changed.
-    fn sync_dpi_cycle(&self) {
-        let presets = self
-            .current_record()
-            .map(|r| self.config.dpi_presets(&r.config_key))
-            .unwrap_or_default();
-        let target = self.current_record().and_then(|r| r.route.clone());
-        let capabilities = self.active_dpi_capabilities().cloned();
-        match self.dpi_cycle.write() {
-            Ok(mut guard) => {
-                *guard = DpiCycleState {
-                    presets,
-                    index: 0,
-                    target,
-                    capabilities,
-                };
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "dpi_cycle lock poisoned — hook will keep stale presets"
-                );
-            }
-        }
-    }
-
-    /// Patch only the DPI capabilities into the shared cycle, preserving the
-    /// current cycle position. Called when lazy discovery completes, which can
-    /// happen long after the cycle was built — unlike [`Self::sync_dpi_cycle`],
-    /// this must not reset the index.
-    fn refresh_dpi_cycle_capabilities(&self) {
-        let capabilities = self.active_dpi_capabilities().cloned();
-        match self.dpi_cycle.write() {
-            Ok(mut guard) => guard.capabilities = capabilities,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "dpi_cycle lock poisoned — hook will keep stale DPI capabilities"
-                );
-            }
-        }
+        // The agent owns the gesture watcher; have it rebuild from config.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 }
 
