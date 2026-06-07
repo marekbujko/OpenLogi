@@ -166,7 +166,14 @@ async fn translate(
             }
         }
         if upd_tx.send(update).is_err() {
-            return; // the manager (and its receiver) is gone
+            break; // the manager (and its receiver) is gone
         }
     }
+    // The watcher channel closed — its thread exited, most likely because
+    // run_pairing panicked and unwound the watcher thread, dropping evt_tx before
+    // any terminal event. Don't leave capture permanently paused: reset the pause
+    // so gesture / DPI-cycle / thumbwheel remapping keeps working (only pairing
+    // itself is then unavailable until the agent restarts).
+    sessions.store(0, Ordering::Relaxed);
+    pairing_active.store(false, Ordering::Relaxed);
 }
