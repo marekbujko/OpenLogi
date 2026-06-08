@@ -176,7 +176,14 @@ fn reconcile_windows(enabled: bool) -> std::io::Result<()> {
     let (run, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_SUBKEY)?;
     if enabled {
         let exe = std::env::current_exe()?;
-        run.set_value(RUN_VALUE, &exe.as_os_str())?;
+        // Windows parses Run-key values as command lines, so a bare path with
+        // spaces (e.g. under "C:\Program Files\") is split at the first space and
+        // the launch silently fails. Quote it. Built via OsString so a non-UTF-8
+        // path survives exactly (no lossy `display()`).
+        let mut quoted = std::ffi::OsString::from("\"");
+        quoted.push(exe.as_os_str());
+        quoted.push("\"");
+        run.set_value(RUN_VALUE, &quoted)?;
         debug!(value = RUN_VALUE, "agent autostart registry value set");
     } else {
         match run.delete_value(RUN_VALUE) {
