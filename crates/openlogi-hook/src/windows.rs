@@ -205,9 +205,14 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
     }
 
     match wparam as u32 {
+        // A positive high word means the wheel was rotated forward (away from the
+        // user). Pass the sign through unchanged so `delta_y > 0` is "scroll up" on
+        // every platform — matching macOS (`SCROLL_WHEEL_EVENT_DELTA_AXIS_1`) and
+        // Linux (`REL_WHEEL`), whose deltas feed the same direction-sensitive
+        // bindings. Negating here flipped scroll-up/-down only on Windows.
         WM_MOUSEWHEEL => Some(MouseEvent::Scroll {
             delta_x: 0.0,
-            delta_y: -(f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA),
+            delta_y: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
         }),
         WM_MOUSEHWHEEL => Some(MouseEvent::Scroll {
             delta_x: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
@@ -275,5 +280,29 @@ mod tests {
         };
 
         assert!(translate_event(WM_LBUTTONDOWN as WPARAM, data).is_none());
+    }
+
+    /// Wheel-forward (away from the user) must produce a positive `delta_y`, the
+    /// same sign macOS and Linux emit for the gesture, so a "scroll up" binding
+    /// fires on the same physical motion on every platform. Guards against the
+    /// sign inversion that previously flipped scroll direction on Windows.
+    #[test]
+    fn wheel_forward_scrolls_up_like_other_platforms() {
+        // The wheel delta lives in the high word of `mouseData`; `+WHEEL_DELTA`
+        // (120) is one notch forward.
+        let forward = MSLLHOOKSTRUCT {
+            mouseData: 120u32 << 16,
+            ..MSLLHOOKSTRUCT::default()
+        };
+        let Some(MouseEvent::Scroll { delta_x, delta_y }) =
+            translate_event(WM_MOUSEWHEEL as WPARAM, forward)
+        else {
+            panic!("expected a scroll event");
+        };
+        assert!(delta_x.abs() < f32::EPSILON);
+        assert!(
+            delta_y > 0.0,
+            "wheel-forward should scroll up, got {delta_y}"
+        );
     }
 }
